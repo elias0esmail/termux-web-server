@@ -11,7 +11,7 @@ import string
 from pathlib import Path
 
 # رقم الإصدار الحالي
-CURRENT_VERSION = "1.2.2"
+CURRENT_VERSION = "1.3.0"
 
 # إعداد مسارات النظام والبيئة
 PREFIX = Path(os.environ.get('PREFIX', '/data/data/com.termux/files/usr'))
@@ -295,7 +295,8 @@ HTDOCS_DIR="{HTDOCS_DIR}"
 VERSION_FILE="{VERSION_FILE}"
 GITHUB_RAW_URL="{GITHUB_RAW_URL}"
 
-show_banner() {{
+show_banner_and_status() {{
+    clear
     echo -e "\\033[1;36m"
     echo "  __  __       _____                                "
     echo " |  \\/  |     / ____|                               "
@@ -306,148 +307,181 @@ show_banner() {{
     echo "          __/ |                                  "
     echo "         |___/        Server Manager v{CURRENT_VERSION}  "
     echo -e "\\033[0m"
+    
+    echo -e "\\033[1;35m═════════════════ [ حالة الخادم ] ═════════════════\\033[0m"
+    pgrep nginx > /dev/null && echo -e " Nginx:    \\033[1;32mيعمل [✓]\\033[0m" || echo -e " Nginx:    \\033[1;31mمتوقف [✗]\\033[0m"
+    pgrep php-fpm > /dev/null && echo -e " PHP-FPM:  \\033[1;32mيعمل [✓]\\033[0m" || echo -e " PHP-FPM:  \\033[1;31mمتوقف [✗]\\033[0m"
+    (pgrep mysqld > /dev/null || pgrep mariadbd > /dev/null) && echo -e " MariaDB:  \\033[1;32mيعمل [✓]\\033[0m" || echo -e " MariaDB:  \\033[1;31mمتوقف [✗]\\033[0m"
+    pgrep redis-server > /dev/null && echo -e " Redis:    \\033[1;32mيعمل [✓]\\033[0m" || echo -e " Redis:    \\033[1;31mمتوقف [✗]\\033[0m"
+    echo -e "\\033[1;35m═════════════════════════════════════════════════\\033[0m\\n"
 }}
 
-case "$1" in
-    start)
-        show_banner
-        echo -e "\\033[1;34m[+] Starting MariaDB...\\033[0m"
-        mkdir -p "$PREFIX/var/lib/mysql"
-        if command -v mariadbd-safe &> /dev/null; then
-            mariadbd-safe --datadir="$PREFIX/var/lib/mysql" > /dev/null 2>&1 &
-        else
-            mysqld_safe --datadir="$PREFIX/var/lib/mysql" > /dev/null 2>&1 &
-        fi
+start_services() {{
+    echo -e "\\033[1;34m[+] بدء تشغيل MariaDB...\\033[0m"
+    mkdir -p "$PREFIX/var/lib/mysql"
+    if command -v mariadbd-safe &> /dev/null; then
+        mariadbd-safe --datadir="$PREFIX/var/lib/mysql" > /dev/null 2>&1 &
+    else
+        mysqld_safe --datadir="$PREFIX/var/lib/mysql" > /dev/null 2>&1 &
+    fi
 
-        echo -e "\\033[1;34m[+] Starting Redis...\\033[0m"
-        mkdir -p "$PREFIX/var/lib/redis"
-        if [ -f "$PREFIX/etc/redis.conf" ]; then
-            redis-server "$PREFIX/etc/redis.conf" --daemonize yes > /dev/null 2>&1
-        else
-            redis-server --daemonize yes > /dev/null 2>&1
-        fi
+    echo -e "\\033[1;34m[+] بدء تشغيل Redis...\\033[0m"
+    mkdir -p "$PREFIX/var/lib/redis"
+    if [ -f "$PREFIX/etc/redis.conf" ]; then
+        redis-server "$PREFIX/etc/redis.conf" --daemonize yes > /dev/null 2>&1
+    else
+        redis-server --daemonize yes > /dev/null 2>&1
+    fi
 
-        echo -e "\\033[1;34m[+] Starting PHP-FPM...\\033[0m"
-        php-fpm > /dev/null 2>&1
+    echo -e "\\033[1;34m[+] بدء تشغيل PHP-FPM...\\033[0m"
+    php-fpm > /dev/null 2>&1
 
-        echo -e "\\033[1;34m[+] Starting Nginx...\\033[0m"
-        nginx > /dev/null 2>&1
+    echo -e "\\033[1;34m[+] بدء تشغيل Nginx...\\033[0m"
+    nginx > /dev/null 2>&1
 
-        echo -e "\\033[1;32m[✓] All services started successfully.\\033[0m"
-        ;;
-    stop)
-        show_banner
-        echo -e "\\033[1;33m[*] Stopping all server services...\\033[0m"
-        pkill -f nginx > /dev/null 2>&1
-        pkill -f php-fpm > /dev/null 2>&1
-        pkill -f redis-server > /dev/null 2>&1
-        pkill -f mysqld > /dev/null 2>&1
-        pkill -f mariadbd > /dev/null 2>&1
-        echo -e "\\033[1;31m[✓] All services stopped.\\033[0m"
-        ;;
-    restart)
-        $0 stop
-        sleep 2
-        $0 start
-        ;;
-    status)
-        show_banner
-        echo -e "\\033[1;35m=== Services Status ===\\033[0m"
-        pgrep nginx > /dev/null && echo -e " Nginx:    \\033[1;32mRunning [✓]\\033[0m" || echo -e " Nginx:    \\033[1;31mStopped [✗]\\033[0m"
-        pgrep php-fpm > /dev/null && echo -e " PHP-FPM:  \\033[1;32mRunning [✓]\\033[0m" || echo -e " PHP-FPM:  \\033[1;31mStopped [✗]\\033[0m"
-        (pgrep mysqld > /dev/null || pgrep mariadbd > /dev/null) && echo -e " MariaDB:  \\033[1;32mRunning [✓]\\033[0m" || echo -e " MariaDB:  \\033[1;31mStopped [✗]\\033[0m"
-        pgrep redis-server > /dev/null && echo -e " Redis:    \\033[1;32mRunning [✓]\\033[0m" || echo -e " Redis:    \\033[1;31mStopped [✗]\\033[0m"
-        ;;
-    update)
-        show_banner
-        echo -e "\\033[1;36m[*] Checking for updates from remote repository...\\033[0m"
-        LOCAL_VER=$(cat "$VERSION_FILE" 2>/dev/null || echo "{CURRENT_VERSION}")
-        
-        mkdir -p "$PREFIX/tmp"
-        TMP_UPD="$PREFIX/tmp/install_server_latest.py"
-        curl -sL "$GITHUB_RAW_URL/install_server.py" -o "$TMP_UPD"
-        
-        if [ ! -s "$TMP_UPD" ]; then
-            echo -e "\\033[1;31m[!] Failed to connect to GitHub or repository file missing.\\033[0m"
-            rm -f "$TMP_UPD"
-            exit 1
-        fi
-        
-        REMOTE_VER=$(grep -oP 'CURRENT_VERSION\\s*=\\s*"\\K[^"]+' "$TMP_UPD" 2>/dev/null || echo "0.0.0")
-        
-        echo -e "  - Installed Version: \\033[1;33m$LOCAL_VER\\033[0m"
-        echo -e "  - Remote Version:    \\033[1;32m$REMOTE_VER\\033[0m"
-        
-        if [ "$LOCAL_VER" != "$REMOTE_VER" ]; then
-            echo -e "\\033[1;35m[!] A new version ($REMOTE_VER) is available!\\033[0m"
-            read -p "Do you want to download and install the update now? (y/N): " confirm
-            case "$confirm" in
-                [yY][eE][sS]|[yY])
-                    echo -e "\\033[1;34m[*] Updating server setup...\\033[0m"
-                    python3 "$TMP_UPD"
-                    rm -f "$TMP_UPD"
-                    echo -e "\\033[1;32m[✓] myserver updated to version $REMOTE_VER successfully!\\033[0m"
-                    ;;
-                *)
-                    echo -e "\\033[1;33m[i] Update cancelled by user.\\033[0m"
-                    rm -f "$TMP_UPD"
-                    ;;
-            esac
-        else
-            echo -e "\\033[1;32m[✓] You are already using the latest version ($LOCAL_VER).\\033[0m"
-            rm -f "$TMP_UPD"
-        fi
-        ;;
-    delete|uninstall)
-        show_banner
-        echo -e "\\033[1;31m════════════════════════════════════════════\\033[0m"
-        echo -e "\\033[1;31m   ⚠️  WARNING: UNINSTALL MYSERVER STACK  ⚠️ \\033[0m"
-        echo -e "\\033[1;31m════════════════════════════════════════════\\033[0m"
-        read -p "Are you sure you want to completely remove myserver? (y/N): " confirm
+    echo -e "\\033[1;32m[✓] تم تشغيل جميع الخدمات بنجاح.\\033[0m"
+    sleep 1.5
+}}
+
+stop_services() {{
+    echo -e "\\033[1;33m[*] إيقاف جميع الخدمات...\\033[0m"
+    pkill -f nginx > /dev/null 2>&1
+    pkill -f php-fpm > /dev/null 2>&1
+    pkill -f redis-server > /dev/null 2>&1
+    pkill -f mysqld > /dev/null 2>&1
+    pkill -f mariadbd > /dev/null 2>&1
+    echo -e "\\033[1;31m[✓] تم إيقاف جميع الخدمات.\\033[0m"
+    sleep 1.5
+}}
+
+restart_services() {{
+    stop_services
+    sleep 1
+    start_services
+}}
+
+update_server() {{
+    echo -e "\\033[1;36m[*] التحقق من التحديثات من المستودع...\\033[0m"
+    LOCAL_VER=$(cat "$VERSION_FILE" 2>/dev/null || echo "{CURRENT_VERSION}")
+    
+    mkdir -p "$PREFIX/tmp"
+    TMP_UPD="$PREFIX/tmp/install_server_latest.py"
+    curl -sL "$GITHUB_RAW_URL/install_server.py" -o "$TMP_UPD"
+    
+    if [ ! -s "$TMP_UPD" ]; then
+        echo -e "\\033[1;31m[!] فشل الاتصال بـ GitHub أو الملف غير موجود.\\033[0m"
+        rm -f "$TMP_UPD"
+        read -p "اضغط Enter للمتابعة..."
+        return
+    fi
+    
+    REMOTE_VER=$(grep -oP 'CURRENT_VERSION\\s*=\\s*"\\K[^"]+' "$TMP_UPD" 2>/dev/null || echo "0.0.0")
+    
+    echo -e "  - الإصدار المثبت: \\033[1;33m$LOCAL_VER\\033[0m"
+    echo -e "  - الإصدار المتاح:  \\033[1;32m$REMOTE_VER\\033[0m"
+    
+    if [ "$LOCAL_VER" != "$REMOTE_VER" ]; then
+        echo -e "\\033[1;35m[!] يتوفر إصدار جديد ($REMOTE_VER)!\\033[0m"
+        read -p "هل تريد تنزيل وتثبيت التحديث الآن؟ (y/N): " confirm
         case "$confirm" in
             [yY][eE][sS]|[yY])
-                echo -e "\\033[1;33m[*] Stopping all running services...\\033[0m"
-                pkill -f nginx > /dev/null 2>&1
-                pkill -f php-fpm > /dev/null 2>&1
-                pkill -f redis-server > /dev/null 2>&1
-                pkill -f mysqld > /dev/null 2>&1
-                pkill -f mariadbd > /dev/null 2>&1
-
-                echo -e "\\033[1;33m[*] Removing configuration files & binaries...\\033[0m"
-                rm -rf "$PREFIX/etc/nginx/ssl"
-                rm -f "$PREFIX/etc/nginx/nginx.conf"
-                rm -f "$PREFIX/etc/php-fpm.d/www.conf"
-                rm -f "$VERSION_FILE"
-                
-                read -p "Do you also want to delete web files ($HTDOCS_DIR)? (y/N): " del_web
-                case "$del_web" in
-                    [yY][eE][sS]|[yY])
-                        rm -rf "$HTDOCS_DIR"
-                        echo -e "\\033[1;32m[✓] Web root directory removed.\\033[0m"
-                        ;;
-                    *)
-                        echo -e "\\033[1;36m[i] Web root directory preserved.\\033[0m"
-                        ;;
-                esac
-
-                rm -f "$PREFIX/bin/myserver"
-                echo -e "\\033[1;32m[✓] myserver uninstalled successfully.\\033[0m"
+                echo -e "\\033[1;34m[*] جاري تحديث السيرفر...\\033[0m"
+                python3 "$TMP_UPD"
+                rm -f "$TMP_UPD"
+                echo -e "\\033[1;32m[✓] تم تحديث myserver إلى الإصدار $REMOTE_VER بنجاح!\\033[0m"
                 ;;
             *)
-                echo -e "\\033[1;36m[i] Uninstall cancelled.\\033[0m"
+                echo -e "\\033[1;33m[i] تم إلغاء التحديث بواسطة المستخدم.\\033[0m"
+                rm -f "$TMP_UPD"
                 ;;
         esac
-        ;;
-    *)
-        show_banner
-        echo "Usage: myserver {{start|stop|restart|status|update|delete}}"
-        ;;
-esac
+    else
+        echo -e "\\033[1;32m[✓] أنت تستخدم أحدث إصدار بالفعل ($LOCAL_VER).\\033[0m"
+        rm -f "$TMP_UPD"
+    fi
+    read -p "اضغط Enter للمتابعة..."
+}}
+
+uninstall_server() {{
+    echo -e "\\033[1;31m════════════════════════════════════════════\\033[0m"
+    echo -e "\\033[1;31m   ⚠️  تحذير: إزالة خادم MYSERVER بالكامل  ⚠️ \\033[0m"
+    echo -e "\\033[1;31m════════════════════════════════════════════\\033[0m"
+    read -p "هل أنت تأكد من رغبتك في حذف myserver بالكامل؟ (y/N): " confirm
+    case "$confirm" in
+        [yY][eE][sS]|[yY])
+            echo -e "\\033[1;33m[*] إيقاف جميع الخدمات...\\033[0m"
+            stop_services
+
+            echo -e "\\033[1;33m[*] حذف ملفات التكوين والملفات التنفيذية...\\033[0m"
+            rm -rf "$PREFIX/etc/nginx/ssl"
+            rm -f "$PREFIX/etc/nginx/nginx.conf"
+            rm -f "$PREFIX/etc/php-fpm.d/www.conf"
+            rm -f "$VERSION_FILE"
+            
+            read -p "هل تريد أيضاً حذف ملفات الويب ($HTDOCS_DIR)؟ (y/N): " del_web
+            case "$del_web" in
+                [yY][eE][sS]|[yY])
+                    rm -rf "$HTDOCS_DIR"
+                    echo -e "\\033[1;32m[✓] تم حذف مجلد موقع الويب.\\033[0m"
+                    ;;
+                *)
+                    echo -e "\\033[1;36m[i] تم الاحتفاظ بمجلد موقع الويب.\\033[0m"
+                    ;;
+            esac
+
+            rm -f "$PREFIX/bin/myserver"
+            echo -e "\\033[1;32m[✓] تم إلغاء تثبيت myserver بنجاح.\\033[0m"
+            exit 0
+            ;;
+        *)
+            echo -e "\\033[1;36m[i] تم إلغاء الحذف.\\033[0m"
+            sleep 1
+            ;;
+    esac
+}}
+
+# تنفيذ أمر مباشر إذا طُلِب عبر الوسطاء (مثال: myserver start)
+if [ -n "$1" ]; then
+    case "$1" in
+        start) start_services ;;
+        stop) stop_services ;;
+        restart) restart_services ;;
+        status) show_banner_and_status; read -p "اضغط Enter للمتابعة..." ;;
+        update) update_server ;;
+        delete|uninstall) uninstall_server ;;
+        *) echo "الاستخدام: myserver [start|stop|restart|status|update|uninstall]" ;;
+    esac
+    exit 0
+fi
+
+# القائمة التفاعلية المستمرة
+while true; do
+    show_banner_and_status
+    echo -e "\\033[1;33mاختر أحد الخيارات التالية:\\033[0m"
+    echo " 1) start     (تشغيل جميع الخدمات)"
+    echo " 2) stop      (إيقاف جميع الخدمات)"
+    echo " 3) restart   (إعادة تشغيل جميع الخدمات)"
+    echo " 4) update    (التحقق من التحديثات وتطبيقها)"
+    echo " 5) uninstall (حذف الخادم وإلغاء التثبيت)"
+    echo " 6) exit      (الخروج)"
+    echo ""
+    read -p "أدخل رقم الخيار [1-6]: " choice
+
+    case "$choice" in
+        1|start) start_services ;;
+        2|stop) stop_services ;;
+        3|restart) restart_services ;;
+        4|update) update_server ;;
+        5|uninstall|delete) uninstall_server ;;
+        6|exit) echo -e "\\033[1;32mتم الخروج.\\033[0m"; exit 0 ;;
+        *) echo -e "\\033[1;31mخيار غير صحيح!\\033[0m"; sleep 1 ;;
+    esac
+done
 """
     try:
         bin_path.write_text(script_content)
         bin_path.chmod(0o755)
-        print("\033[1;32m [✓] CLI Tool 'myserver' configured. \033[0m")
+        print("\033[1;32m [✓] CLI Tool 'myserver' configured with interactive menu. \033[0m")
         return True
     except Exception as e:
         print(f"\033[1;31m [!] CLI creation error: {e}\033[0m")
@@ -502,12 +536,7 @@ def main():
         print("HTTP URL:  http://localhost:8080")
         print("HTTPS URL: https://localhost:8443")
         print("phpMyAdmin: http://localhost:8080/phpmyadmin")
-        print("\n\033[1;35mControl Commands:\033[0m")
-        print("  myserver start    - Start all services")
-        print("  myserver stop     - Stop all services")
-        print("  myserver status   - Check running status")
-        print("  myserver update   - Compare version & update from GitHub")
-        print("  myserver delete   - Uninstall server stack completely\n")
+        print("\n\033[1;35mType 'myserver' anytime to open the interactive manager.\033[0m\n")
 
         cleanup_repository()
 
