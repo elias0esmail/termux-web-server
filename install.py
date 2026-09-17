@@ -1,35 +1,62 @@
 #!/data/data/com.termux/files/usr/bin/python3
 
 import os
+import sys
 import time
 import shutil
 import re
 import subprocess
+import random
+import string
 from pathlib import Path
+
+# رقم الإصدار الحالي
+CURRENT_VERSION = "1.2.0"
 
 # إعداد مسارات النظام والبيئة
 PREFIX = Path(os.environ.get('PREFIX', '/data/data/com.termux/files/usr'))
 HOME = Path.home()
+# مجلد htdocs في ذاكرة الهاتف الداخلية عبر Termux Storage
 HTDOCS_DIR = HOME / "storage/shared/htdocs"
 NGINX_DIR = PREFIX / "etc/nginx"
 PHP_FPM_DIR = PREFIX / "etc/php-fpm.d"
 SSL_DIR = NGINX_DIR / "ssl"
+TMP_DIR = PREFIX / "tmp"
+VERSION_FILE = PREFIX / "etc/myserver_version"
 REPO_DIR = Path(__file__).resolve().parent
+
+# رابط المستودع لمقارنة الإصدارات والتحديث
+GITHUB_RAW_URL = "https://raw.githubusercontent.com/elias0esmail/termux-web-server/main"
 
 def run_cmd(cmd, check=False):
     """تشغيل أوامر النظام بأمان دون إغراق الشاشة بالرسائل"""
     return subprocess.run(cmd, shell=True, check=check, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 def setup_mariadb():
-    """تهيئة وإعداد قاعدة البيانات MariaDB"""
+    """تهيئة وإعداد قاعدة البيانات MariaDB وإصلاح مسارات التشغيل"""
     try:
         data_dir = PREFIX / "var/lib/mysql"
-        if not data_dir.exists() or not any(data_dir.iterdir()):
-            run_cmd("mariadb-install-db")
+        data_dir.mkdir(parents=True, exist_ok=True)
+        if not any(data_dir.iterdir()):
+            run_cmd(f"mariadb-install-db --datadir='{data_dir}'")
             print("\033[1;32m [✓] MariaDB database initialized. \033[0m")
         return True
     except Exception as e:
         print(f"\033[1;31m [!] MariaDB init error: {e}\033[0m")
+        return False
+
+def setup_redis():
+    """تهيئة وإعداد خادم Redis"""
+    try:
+        redis_data = PREFIX / "var/lib/redis"
+        redis_data.mkdir(parents=True, exist_ok=True)
+        redis_conf = PREFIX / "etc/redis.conf"
+        if not redis_conf.exists():
+            redis_conf.write_text(f"dir {redis_data}\ndaemonize yes\nport 6379\n")
+        print("\033[1;32m [✓] Redis configured. \033[0m")
+        return True
+    except Exception as e:
+        print(f"\033[1;31m [!] Redis init error: {e}\033[0m")
         return False
 
 def setup_php_fpm():
@@ -98,7 +125,7 @@ IP.1 = 127.0.0.1
         return False
 
 def setup_nginx():
-    """إعداد ملف Nginx المتقدم لدعم HTTP/HTTPS و PHP-FPM"""
+    """إعداد ملف Nginx لدعم HTTP/HTTPS و PHP-FPM مع توجيه Root لذاكرة الهاتف"""
     try:
         conf_path = NGINX_DIR / "nginx.conf"
         cert_path = SSL_DIR / "server.crt"
@@ -169,8 +196,51 @@ http {{
         print(f"\033[1;31m [!] Nginx config error: {e}\033[0m")
         return False
 
+def create_php_ini():
+    """ضبط إعدادات PHP وإصلاح مسار Sessions لحل مشكلة تسجيل دخول phpMyAdmin"""
+    php_ini_path = PREFIX / 'etc/php/php.ini'
+    TMP_DIR.mkdir(parents=True, exist_ok=True)
+    
+    php_ini_content = f"""\
+upload_max_filesize = 256M
+post_max_size = 512M
+memory_limit = 512M
+max_execution_time = 180
+error_reporting = E_ALL & ~E_DEPRECATED
+display_errors = On
+date.timezone = UTC
+
+; Session settings (Crucial for phpMyAdmin fix)
+session.save_handler = files
+session.save_path = "{TMP_DIR}"
+session.use_cookies = 1
+session.use_only_cookies = 1
+session.name = PHPSESSID
+session.auto_start = 0
+session.cookie_lifetime = 0
+session.cookie_path = /
+session.gc_maxlifetime = 1440
+
+; Enable extensions
+extension=mysqli
+extension=pdo_mysql
+extension=mbstring
+extension=openssl
+extension=curl
+extension=zip
+extension=gd
+"""
+    try:
+        php_ini_path.parent.mkdir(parents=True, exist_ok=True)
+        php_ini_path.write_text(php_ini_content)
+        print("\033[1;32m [✓] php.ini updated & PHP Sessions initialized. \033[0m")
+        return True
+    except Exception as e:
+        print(f"\033[1;31m [!] php.ini error: {e}\033[0m")
+        return False
+
 def setup_htdocs():
-    """إنشاء مجلد htdocs الرئيسي والملفات الترحيبية"""
+    """إنشاء مجلد htdocs في ذاكرة الهاتف وتجهيز ملفات البداية"""
     try:
         HTDOCS_DIR.mkdir(parents=True, exist_ok=True)
         (HTDOCS_DIR / "index.php").write_text("<?php echo '<h1>Nginx + PHP-FPM Server is Running!</h1>'; ?>")
@@ -184,7 +254,7 @@ def setup_htdocs():
         return False
 
 def install_phpmyadmin():
-    """تنزيل وإعداد phpMyAdmin التلقائي"""
+    """تنزيل وإعداد phpMyAdmin وتوليد Blowfish Secret لحل مشكلة تعليق صفحة الدخول"""
     pma_dir = HTDOCS_DIR / "phpmyadmin"
     if pma_dir.exists():
         print("\033[1;33m [!] phpMyAdmin already installed. \033[0m")
@@ -192,7 +262,7 @@ def install_phpmyadmin():
 
     try:
         print("\033[1;34m [*] Downloading phpMyAdmin... \033[0m")
-        tar_file = HOME / "pma.tar.gz"
+        tar_file = TMP_DIR / "pma.tar.gz"
         url = "https://www.phpmyadmin.net/downloads/phpMyAdmin-latest-all-languages.tar.gz"
         
         run_cmd(f"curl -sL '{url}' -o '{tar_file}'")
@@ -204,44 +274,88 @@ def install_phpmyadmin():
         config_sample = pma_dir / "config.sample.inc.php"
         config_file = pma_dir / "config.inc.php"
 
+        # توليد كود عشوائي بـ 32 رمزاً للـ Blowfish Secret
+        secret = ''.join(random.choices(string.ascii_letters + string.digits, k=32))
+
         if config_sample.exists():
             content = config_sample.read_text()
+            content = re.sub(r"\$cfg\['blowfish_secret'\]\s*=\s*'';|\$cfg\['blowfish_secret'\]\s*=\s*\".*\";", f"$cfg['blowfish_secret'] = '{secret}';", content)
             content = re.sub(r"\$cfg\['Servers'\]\[\$i\]\['AllowNoPassword'\]\s*=\s*false;", "$cfg['Servers'][$i]['AllowNoPassword'] = true;", content)
             content = re.sub(r"\$cfg\['Servers'\]\[\$i\]\['host'\]\s*=\s*'localhost';", "$cfg['Servers'][$i]['host'] = '127.0.0.1';", content)
+            
+            pma_tmp = pma_dir / "tmp"
+            pma_tmp.mkdir(exist_ok=True)
+            content += f"\n$cfg['TempDir'] = '{pma_tmp}';\n"
+            
             config_file.write_text(content)
 
-        print("\033[1;32m [✓] phpMyAdmin ready. \033[0m")
+        print("\033[1;32m [✓] phpMyAdmin installed with login fix applied. \033[0m")
         return True
     except Exception as e:
         print(f"\033[1;31m [!] phpMyAdmin error: {e}\033[0m")
         return False
 
 def create_myserver_cli():
-    """إنشاء أداة التحكم myserver مع التحديث التلقائي، معاينة Commit Log واستئذان المستخدم"""
+    """إنشاء أداة myserver المطورة مع تحسين الواجهة، خيار الحذف، ومقارنة الإصدارات للتحديث"""
     bin_path = PREFIX / "bin/myserver"
+    VERSION_FILE.write_text(CURRENT_VERSION)
+
     script_content = f"""#!/data/data/com.termux/files/usr/bin/bash
 
-REPO_PATH="{REPO_DIR}"
+PREFIX="{PREFIX}"
+HTDOCS_DIR="{HTDOCS_DIR}"
+VERSION_FILE="{VERSION_FILE}"
+GITHUB_RAW_URL="{GITHUB_RAW_URL}"
+
+show_banner() {{
+    echo -e "\\033[1;36m"
+    echo "  __  __       _____                                "
+    echo " |  \\/  |     / ____|                               "
+    echo " | \\  / |0_ _| (___   ___  _ __ __   _____ _ __ "
+    echo " | |\\/| | | | |\\___ \\ / _ \\| '__|\\ \\ / / _ \\ '__|"
+    echo " | |  | | |_| |____) |  __/| |    \\ V /  __/ |   "
+    echo " |_|  |_|\\__, |_____/ \\___||_|     \\_/ \\___|_|   "
+    echo "          __/ |                                  "
+    echo "         |___/        Server Manager v{CURRENT_VERSION}  "
+    echo -e "\\033[0m"
+}}
 
 case "$1" in
     start)
-        echo -e "\\033[1;34mStarting MariaDB...\\033[0m"
-        mysqld_safe --datadir='{PREFIX}/var/lib/mysql' > /dev/null 2>&1 &
-        echo -e "\\033[1;34mStarting Redis...\\033[0m"
-        redis-server --daemonize yes > /dev/null 2>&1
-        echo -e "\\033[1;34mStarting PHP-FPM...\\033[0m"
+        show_banner
+        echo -e "\\033[1;34m[+] Starting MariaDB...\\033[0m"
+        mkdir -p "$PREFIX/var/lib/mysql"
+        if command -v mariadbd-safe &> /dev/null; then
+            mariadbd-safe --datadir="$PREFIX/var/lib/mysql" > /dev/null 2>&1 &
+        else
+            mysqld_safe --datadir="$PREFIX/var/lib/mysql" > /dev/null 2>&1 &
+        fi
+
+        echo -e "\\033[1;34m[+] Starting Redis...\\033[0m"
+        mkdir -p "$PREFIX/var/lib/redis"
+        if [ -f "$PREFIX/etc/redis.conf" ]; then
+            redis-server "$PREFIX/etc/redis.conf" --daemonize yes > /dev/null 2>&1
+        else
+            redis-server --daemonize yes > /dev/null 2>&1
+        fi
+
+        echo -e "\\033[1;34m[+] Starting PHP-FPM...\\033[0m"
         php-fpm > /dev/null 2>&1
-        echo -e "\\033[1;34mStarting Nginx...\\033[0m"
+
+        echo -e "\\033[1;34m[+] Starting Nginx...\\033[0m"
         nginx > /dev/null 2>&1
-        echo -e "\\033[1;32mAll services started successfully.\\033[0m"
+
+        echo -e "\\033[1;32m[✓] All services started successfully.\\033[0m"
         ;;
     stop)
-        echo -e "\\033[1;33mStopping services...\\033[0m"
-        pkill -f nginx
-        pkill -f php-fpm
-        pkill -f redis-server
-        pkill -f mysqld
-        echo -e "\\033[1;31mAll services stopped.\\033[0m"
+        show_banner
+        echo -e "\\033[1;33m[*] Stopping all server services...\\033[0m"
+        pkill -f nginx > /dev/null 2>&1
+        pkill -f php-fpm > /dev/null 2>&1
+        pkill -f redis-server > /dev/null 2>&1
+        pkill -f mysqld > /dev/null 2>&1
+        pkill -f mariadbd > /dev/null 2>&1
+        echo -e "\\033[1;31m[✓] All services stopped.\\033[0m"
         ;;
     restart)
         $0 stop
@@ -249,47 +363,95 @@ case "$1" in
         $0 start
         ;;
     status)
-        echo "=== Services Status ==="
-        pgrep nginx > /dev/null && echo -e "Nginx:    \\033[1;32mRunning\\033[0m" || echo -e "Nginx:    \\033[1;31mStopped\\033[0m"
-        pgrep php-fpm > /dev/null && echo -e "PHP-FPM:  \\033[1;32mRunning\\033[0m" || echo -e "PHP-FPM:  \\033[1;31mStopped\\033[0m"
-        pgrep mysqld > /dev/null && echo -e "MariaDB:  \\033[1;32mRunning\\033[0m" || echo -e "MariaDB:  \\033[1;31mStopped\\033[0m"
-        pgrep redis-server > /dev/null && echo -e "Redis:    \\033[1;32mRunning\\033[0m" || echo -e "Redis:    \\033[1;31mStopped\\033[0m"
+        show_banner
+        echo -e "\\033[1;35m=== Services Status ===\\033[0m"
+        pgrep nginx > /dev/null && echo -e " Nginx:    \\033[1;32mRunning [✓]\\033[0m" || echo -e " Nginx:    \\033[1;31mStopped [✗]\\033[0m"
+        pgrep php-fpm > /dev/null && echo -e " PHP-FPM:  \\033[1;32mRunning [✓]\\033[0m" || echo -e " PHP-FPM:  \\033[1;31mStopped [✗]\\033[0m"
+        (pgrep mysqld > /dev/null || pgrep mariadbd > /dev/null) && echo -e " MariaDB:  \\033[1;32mRunning [✓]\\033[0m" || echo -e " MariaDB:  \\033[1;31mStopped [✗]\\033[0m"
+        pgrep redis-server > /dev/null && echo -e " Redis:    \\033[1;32mRunning [✓]\\033[0m" || echo -e " Redis:    \\033[1;31mStopped [✗]\\033[0m"
         ;;
     update)
-        echo -e "\\033[1;36mChecking for updates from GitHub...\\033[0m"
-        if [ -d "$REPO_PATH/.git" ]; then
-            cd "$REPO_PATH"
-            git fetch origin > /dev/null 2>&1
-            LOCAL=$(git rev-parse HEAD)
-            REMOTE=$(git rev-parse @{{u}})
-            if [ "$LOCAL" != "$REMOTE" ]; then
-                echo -e "\\033[1;33m[!] New updates available on GitHub!\\033[0m"
-                echo -e "\\033[1;35m--- List of New Changes (Commits) ---\\033[0m"
-                git log HEAD..@{{u}} --pretty=format:'- %h: %s (%cr) <%an>'
-                echo -e "\\n\\033[1;35m-------------------------------------\\033[0m"
-                
-                read -p "Do you want to apply these updates? (y/N): " confirm
-                case "$confirm" in
-                    [yY][eE][sS]|[yY])
-                        echo -e "\\033[1;34mPulling latest changes from GitHub...\\033[0m"
-                        git pull origin $(git rev-parse --abbrev-ref HEAD)
-                        echo -e "\\033[1;34mRe-applying server setup...\\033[0m"
-                        python3 "$REPO_PATH/install_server.py"
-                        echo -e "\\033[1;32mServer updated successfully!\\033[0m"
-                        ;;
-                    *)
-                        echo -e "\\033[1;33mUpdate process cancelled by user.\\033[0m"
-                        ;;
-                esac
-            else
-                echo -e "\\033[1;32m[✓] Server is already up to date.\\033[0m"
-            fi
+        show_banner
+        echo -e "\\033[1;36m[*] Checking for updates from remote repository...\\033[0m"
+        LOCAL_VER=$(cat "$VERSION_FILE" 2>/dev/null || echo "{CURRENT_VERSION}")
+        
+        TMP_UPD="/tmp/install_server_latest.py"
+        curl -sL "$GITHUB_RAW_URL/install_server.py" -o "$TMP_UPD"
+        
+        if [ ! -s "$TMP_UPD" ]; then
+            echo -e "\\033[1;31m[!] Failed to connect to GitHub or repository file missing.\\033[0m"
+            rm -f "$TMP_UPD"
+            exit 1
+        fi
+        
+        REMOTE_VER=$(grep -oP 'CURRENT_VERSION\\s*=\\s*"\\K[^"]+' "$TMP_UPD" 2>/dev/null || echo "0.0.0")
+        
+        echo -e "  - Installed Version: \\033[1;33m$LOCAL_VER\\033[0m"
+        echo -e "  - Remote Version:    \\033[1;32m$REMOTE_VER\\033[0m"
+        
+        if [ "$LOCAL_VER" != "$REMOTE_VER" ]; then
+            echo -e "\\033[1;35m[!] A new version ($REMOTE_VER) is available!\\033[0m"
+            read -p "Do you want to download and install the update now? (y/N): " confirm
+            case "$confirm" in
+                [yY][eE][sS]|[yY])
+                    echo -e "\\033[1;34m[*] Updating server setup...\\033[0m"
+                    python3 "$TMP_UPD"
+                    rm -f "$TMP_UPD"
+                    echo -e "\\033[1;32m[✓] myserver updated to version $REMOTE_VER successfully!\\033[0m"
+                    ;;
+                *)
+                    echo -e "\\033[1;33m[i] Update cancelled by user.\\033[0m"
+                    rm -f "$TMP_UPD"
+                    ;;
+            esac
         else
-            echo -e "\\033[1;31mError: $REPO_PATH is not a Git repository.\\033[0m"
+            echo -e "\\033[1;32m[✓] You are already using the latest version ($LOCAL_VER).\\033[0m"
+            rm -f "$TMP_UPD"
         fi
         ;;
+    delete|uninstall)
+        show_banner
+        echo -e "\\033[1;31m════════════════════════════════════════════\\033[0m"
+        echo -e "\\033[1;31m   ⚠️  WARNING: UNINSTALL MYSERVER STACK  ⚠️ \\033[0m"
+        echo -e "\\033[1;31m════════════════════════════════════════════\\033[0m"
+        read -p "Are you sure you want to completely remove myserver? (y/N): " confirm
+        case "$confirm" in
+            [yY][eE][sS]|[yY])
+                echo -e "\\033[1;33m[*] Stopping all running services...\\033[0m"
+                pkill -f nginx > /dev/null 2>&1
+                pkill -f php-fpm > /dev/null 2>&1
+                pkill -f redis-server > /dev/null 2>&1
+                pkill -f mysqld > /dev/null 2>&1
+                pkill -f mariadbd > /dev/null 2>&1
+
+                echo -e "\\033[1;33m[*] Removing configuration files & binaries...\\033[0m"
+                rm -rf "$PREFIX/etc/nginx/ssl"
+                rm -f "$PREFIX/etc/nginx/nginx.conf"
+                rm -f "$PREFIX/etc/php-fpm.d/www.conf"
+                rm -f "$VERSION_FILE"
+                
+                read -p "Do you also want to delete web files ($HTDOCS_DIR)? (y/N): " del_web
+                case "$del_web" in
+                    [yY][eE][sS]|[yY])
+                        rm -rf "$HTDOCS_DIR"
+                        echo -e "\\033[1;32m[✓] Web root directory removed.\\033[0m"
+                        ;;
+                    *)
+                        echo -e "\\033[1;36m[i] Web root directory preserved.\\033[0m"
+                        ;;
+                esac
+
+                rm -f "$PREFIX/bin/myserver"
+                echo -e "\\033[1;32m[✓] myserver uninstalled successfully.\\033[0m"
+                ;;
+            *)
+                echo -e "\\033[1;36m[i] Uninstall cancelled.\\033[0m"
+                ;;
+        esac
+        ;;
     *)
-        echo "Usage: myserver {{start|stop|restart|status|update}}"
+        show_banner
+        echo "Usage: myserver {start|stop|restart|status|update|delete}"
         ;;
 esac
 """
@@ -302,43 +464,36 @@ esac
         print(f"\033[1;31m [!] CLI creation error: {e}\033[0m")
         return False
 
-def create_php_ini():
-    """ضبط إعدادات رفع الملفات والذاكرة في php.ini"""
-    php_ini_path = PREFIX / 'etc/php/php.ini'
-    php_ini_content = """\
-upload_max_filesize = 256M
-post_max_size = 512M
-memory_limit = 512M
-max_execution_time = 180
-error_reporting = E_ALL & ~E_DEPRECATED
-display_errors = On
-date.timezone = UTC
-"""
+def cleanup_repository():
+    """حذف مجلد المستودع المحمّل بعد اكتمال التثبيت بنجاح"""
     try:
-        php_ini_path.parent.mkdir(parents=True, exist_ok=True)
-        php_ini_path.write_text(php_ini_content)
-        print("\033[1;32m [✓] php.ini updated. \033[0m")
-        return True
+        cwd = Path.cwd().resolve()
+        if cwd not in [HOME, PREFIX, Path('/'), Path('/data/data/com.termux/files')]:
+            if (cwd / "install_server.py").exists() or (cwd / ".git").exists():
+                print("\033[1;33m[*] Cleaning up downloaded repository folder...\033[0m")
+                os.chdir(HOME)
+                shutil.rmtree(cwd, ignore_errors=True)
+                print("\033[1;32m[✓] Downloaded repository folder deleted successfully.\033[0m")
     except Exception as e:
-        print(f"\033[1;31m [!] php.ini error: {e}\033[0m")
-        return False
+        print(f"\033[1;31m [!] Cleanup notice: {e}\033[0m")
 
 def main():
     try:
-        print("\033[1;33m[+] Deploying Advanced Nginx + PHP-FPM Server Stack...\033[0m")
+        print(f"\033[1;33m[+] Deploying Advanced Nginx + PHP-FPM Server Stack v{CURRENT_VERSION}...\033[0m")
         
         steps = [
             ("Updating Packages", "pkg update -y && pkg upgrade -y"),
             ("Storage Setup", None),
             ("Installing Core Software", "pkg install -y nginx php php-fpm mariadb redis openssl-tool curl tar git wget"),
             ("MariaDB Initialization", setup_mariadb),
+            ("Redis Setup", setup_redis),
             ("PHP-FPM Configuration", setup_php_fpm),
             ("SSL Certificate Setup", setup_ssl),
             ("Nginx Server Setup", setup_nginx),
+            ("PHP Configuration & Sessions Fix", create_php_ini),
             ("Web Root Setup", setup_htdocs),
             ("phpMyAdmin Installation", install_phpmyadmin),
-            ("CLI & Auto-Update Configuration", create_myserver_cli),
-            ("PHP Configuration", create_php_ini)
+            ("CLI Configuration", create_myserver_cli)
         ]
 
         for i, (desc, action) in enumerate(steps, 1):
@@ -358,15 +513,20 @@ def main():
         print(f"\033[1;36mWeb Root: {HTDOCS_DIR}\033[0m")
         print("HTTP URL:  http://localhost:8080")
         print("HTTPS URL: https://localhost:8443")
-        print("\033[1;35mControl Commands:\033[0m")
-        print("  myserver start   - Start all services (Nginx, PHP-FPM, MariaDB, Redis)")
-        print("  myserver stop    - Stop all services")
-        print("  myserver status  - Check running status")
-        print("  myserver update  - Preview changes & update from GitHub")
+        print("phpMyAdmin: http://localhost:8080/phpmyadmin")
+        print("\n\033[1;35mControl Commands:\033[0m")
+        print("  myserver start    - Start all services")
+        print("  myserver stop     - Stop all services")
+        print("  myserver status   - Check running status")
+        print("  myserver update   - Compare version & update from GitHub")
+        print("  myserver delete   - Uninstall server stack completely\n")
+
+        # حذف مجلد المستودع تلقائياً بعد اكتمال التثبيت
+        cleanup_repository()
 
     except Exception as e:
         print(f"\033[1;31m[!] Installation Error: {e}\033[0m")
-        exit(1)
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
