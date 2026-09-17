@@ -11,7 +11,7 @@ import string
 from pathlib import Path
 
 # رقم الإصدار الحالي
-CURRENT_VERSION = "1.2.1"
+CURRENT_VERSION = "1.2.2"
 
 # إعداد مسارات النظام والبيئة
 PREFIX = Path(os.environ.get('PREFIX', '/data/data/com.termux/files/usr'))
@@ -201,7 +201,7 @@ error_reporting = E_ALL & ~E_DEPRECATED
 display_errors = On
 date.timezone = UTC
 
-; Session settings (Crucial for phpMyAdmin fix)
+; Session settings
 session.save_handler = files
 session.save_path = "{TMP_DIR}"
 session.use_cookies = 1
@@ -251,6 +251,7 @@ def install_phpmyadmin():
 
     try:
         print("\033[1;34m [*] Downloading phpMyAdmin... \033[0m")
+        TMP_DIR.mkdir(parents=True, exist_ok=True)
         tar_file = TMP_DIR / "pma.tar.gz"
         url = "https://www.phpmyadmin.net/downloads/phpMyAdmin-latest-all-languages.tar.gz"
         
@@ -277,7 +278,7 @@ def install_phpmyadmin():
             
             config_file.write_text(content)
 
-        print("\033[1;32m [✓] phpMyAdmin installed with login fix applied. \033[0m")
+        print("\033[1;32m [✓] phpMyAdmin installed with login configuration. \033[0m")
         return True
     except Exception as e:
         print(f"\033[1;31m [!] phpMyAdmin error: {e}\033[0m")
@@ -362,7 +363,8 @@ case "$1" in
         echo -e "\\033[1;36m[*] Checking for updates from remote repository...\\033[0m"
         LOCAL_VER=$(cat "$VERSION_FILE" 2>/dev/null || echo "{CURRENT_VERSION}")
         
-        TMP_UPD="/tmp/install_server_latest.py"
+        mkdir -p "$PREFIX/tmp"
+        TMP_UPD="$PREFIX/tmp/install_server_latest.py"
         curl -sL "$GITHUB_RAW_URL/install_server.py" -o "$TMP_UPD"
         
         if [ ! -s "$TMP_UPD" ]; then
