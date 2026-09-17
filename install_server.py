@@ -11,12 +11,11 @@ import string
 from pathlib import Path
 
 # رقم الإصدار الحالي
-CURRENT_VERSION = "1.2.0"
+CURRENT_VERSION = "1.2.1"
 
 # إعداد مسارات النظام والبيئة
 PREFIX = Path(os.environ.get('PREFIX', '/data/data/com.termux/files/usr'))
 HOME = Path.home()
-# مجلد htdocs في ذاكرة الهاتف الداخلية عبر Termux Storage
 HTDOCS_DIR = HOME / "storage/shared/htdocs"
 NGINX_DIR = PREFIX / "etc/nginx"
 PHP_FPM_DIR = PREFIX / "etc/php-fpm.d"
@@ -25,15 +24,12 @@ TMP_DIR = PREFIX / "tmp"
 VERSION_FILE = PREFIX / "etc/myserver_version"
 REPO_DIR = Path(__file__).resolve().parent
 
-# رابط المستودع لمقارنة الإصدارات والتحديث
 GITHUB_RAW_URL = "https://raw.githubusercontent.com/elias0esmail/termux-web-server/main"
 
 def run_cmd(cmd, check=False):
-    """تشغيل أوامر النظام بأمان دون إغراق الشاشة بالرسائل"""
     return subprocess.run(cmd, shell=True, check=check, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 def setup_mariadb():
-    """تهيئة وإعداد قاعدة البيانات MariaDB وإصلاح مسارات التشغيل"""
     try:
         data_dir = PREFIX / "var/lib/mysql"
         data_dir.mkdir(parents=True, exist_ok=True)
@@ -46,7 +42,6 @@ def setup_mariadb():
         return False
 
 def setup_redis():
-    """تهيئة وإعداد خادم Redis"""
     try:
         redis_data = PREFIX / "var/lib/redis"
         redis_data.mkdir(parents=True, exist_ok=True)
@@ -60,7 +55,6 @@ def setup_redis():
         return False
 
 def setup_php_fpm():
-    """تهيئة PHP-FPM للاستماع على 127.0.0.1:9000"""
     try:
         PHP_FPM_DIR.mkdir(parents=True, exist_ok=True)
         www_conf = PHP_FPM_DIR / "www.conf"
@@ -84,7 +78,6 @@ pm.max_spare_servers = 3
         return False
 
 def setup_ssl():
-    """إنشاء شهادات SSL المخصصة لـ Nginx"""
     try:
         SSL_DIR.mkdir(parents=True, exist_ok=True)
         cert_path = SSL_DIR / "server.crt"
@@ -125,7 +118,6 @@ IP.1 = 127.0.0.1
         return False
 
 def setup_nginx():
-    """إعداد ملف Nginx لدعم HTTP/HTTPS و PHP-FPM مع توجيه Root لذاكرة الهاتف"""
     try:
         conf_path = NGINX_DIR / "nginx.conf"
         cert_path = SSL_DIR / "server.crt"
@@ -197,7 +189,6 @@ http {{
         return False
 
 def create_php_ini():
-    """ضبط إعدادات PHP وإصلاح مسار Sessions لحل مشكلة تسجيل دخول phpMyAdmin"""
     php_ini_path = PREFIX / 'etc/php/php.ini'
     TMP_DIR.mkdir(parents=True, exist_ok=True)
     
@@ -240,7 +231,6 @@ extension=gd
         return False
 
 def setup_htdocs():
-    """إنشاء مجلد htdocs في ذاكرة الهاتف وتجهيز ملفات البداية"""
     try:
         HTDOCS_DIR.mkdir(parents=True, exist_ok=True)
         (HTDOCS_DIR / "index.php").write_text("<?php echo '<h1>Nginx + PHP-FPM Server is Running!</h1>'; ?>")
@@ -254,7 +244,6 @@ def setup_htdocs():
         return False
 
 def install_phpmyadmin():
-    """تنزيل وإعداد phpMyAdmin وتوليد Blowfish Secret لحل مشكلة تعليق صفحة الدخول"""
     pma_dir = HTDOCS_DIR / "phpmyadmin"
     if pma_dir.exists():
         print("\033[1;33m [!] phpMyAdmin already installed. \033[0m")
@@ -274,7 +263,6 @@ def install_phpmyadmin():
         config_sample = pma_dir / "config.sample.inc.php"
         config_file = pma_dir / "config.inc.php"
 
-        # توليد كود عشوائي بـ 32 رمزاً للـ Blowfish Secret
         secret = ''.join(random.choices(string.ascii_letters + string.digits, k=32))
 
         if config_sample.exists():
@@ -296,7 +284,6 @@ def install_phpmyadmin():
         return False
 
 def create_myserver_cli():
-    """إنشاء أداة myserver المطورة مع تحسين الواجهة، خيار الحذف، ومقارنة الإصدارات للتحديث"""
     bin_path = PREFIX / "bin/myserver"
     VERSION_FILE.write_text(CURRENT_VERSION)
 
@@ -451,7 +438,7 @@ case "$1" in
         ;;
     *)
         show_banner
-        echo "Usage: myserver {start|stop|restart|status|update|delete}"
+        echo "Usage: myserver {{start|stop|restart|status|update|delete}}"
         ;;
 esac
 """
@@ -465,7 +452,6 @@ esac
         return False
 
 def cleanup_repository():
-    """حذف مجلد المستودع المحمّل بعد اكتمال التثبيت بنجاح"""
     try:
         cwd = Path.cwd().resolve()
         if cwd not in [HOME, PREFIX, Path('/'), Path('/data/data/com.termux/files')]:
@@ -521,7 +507,6 @@ def main():
         print("  myserver update   - Compare version & update from GitHub")
         print("  myserver delete   - Uninstall server stack completely\n")
 
-        # حذف مجلد المستودع تلقائياً بعد اكتمال التثبيت
         cleanup_repository()
 
     except Exception as e:
@@ -530,4 +515,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
