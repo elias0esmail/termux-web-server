@@ -11,7 +11,7 @@ import string
 from pathlib import Path
 
 # Current Version
-CURRENT_VERSION = "1.4.1"
+CURRENT_VERSION = "1.5.0"
 
 # System and Environment Paths
 PREFIX = Path(os.environ.get('PREFIX', '/data/data/com.termux/files/usr'))
@@ -310,13 +310,13 @@ show_banner_and_status() {{
     echo -e "\\033[0m"
     
     echo -e "\\033[1;35m═════════════════ [ SERVICES STATUS ] ═════════════════\\033[0m"
-    pgrep -x nginx > /dev/null && echo -e " Nginx:    \\033[1;32mRunning [✓]\\033[0m" || echo -e " Nginx:    \\033[1;31mStopped [✗]\\033[0m"
-    pgrep -x php-fpm > /dev/null && echo -e " PHP-FPM:  \\033[1;32mRunning [✓]\\033[0m" || echo -e " PHP-FPM:  \\033[1;31mStopped [✗]\\033[0m"
+    pgrep -f nginx > /dev/null && echo -e " Nginx:    \\033[1;32mRunning [✓]\\033[0m" || echo -e " Nginx:    \\033[1;31mStopped [✗]\\033[0m"
+    pgrep -f php-fpm > /dev/null && echo -e " PHP-FPM:  \\033[1;32mRunning [✓]\\033[0m" || echo -e " PHP-FPM:  \\033[1;31mStopped [✗]\\033[0m"
     pgrep -f "mariadb|mysqld" > /dev/null && echo -e " MariaDB:  \\033[1;32mRunning [✓]\\033[0m" || echo -e " MariaDB:  \\033[1;31mStopped [✗]\\033[0m"
     pgrep -f redis-server > /dev/null && echo -e " Redis:    \\033[1;32mRunning [✓]\\033[0m" || echo -e " Redis:    \\033[1;31mStopped [✗]\\033[0m"
     echo -e "\\033[1;35m═══════════════════════════════════════════════════════\\033[0m\\n"
 
-    if pgrep -x nginx > /dev/null || pgrep -x php-fpm > /dev/null || pgrep -f "mariadb|mysqld" > /dev/null; then
+    if pgrep -f nginx > /dev/null || pgrep -f php-fpm > /dev/null || pgrep -f "mariadb|mysqld" > /dev/null || pgrep -f redis-server > /dev/null; then
         echo -e "\\033[1;36m═════════════════ [ SERVER INFORMATION ] ═════════════════\\033[0m"
         echo -e " 📂 Web Root Path : \\033[1;33m$HTDOCS_DIR\\033[0m"
         echo -e " 🌐 HTTP URL     : \\033[1;34mhttp://localhost:8080\\033[0m"
@@ -353,12 +353,12 @@ start_services() {{
     fi
 
     echo -e "\\033[1;34m[+] Starting PHP-FPM...\\033[0m"
-    if ! pgrep -x php-fpm > /dev/null; then
+    if ! pgrep -f php-fpm > /dev/null; then
         php-fpm > /dev/null 2>&1
     fi
 
     echo -e "\\033[1;34m[+] Starting Nginx...\\033[0m"
-    if ! pgrep -x nginx > /dev/null; then
+    if ! pgrep -f nginx > /dev/null; then
         nginx > /dev/null 2>&1
     fi
 
@@ -382,7 +382,7 @@ stop_services() {{
     pkill -f mysqld > /dev/null 2>&1
     pkill -f mariadbd > /dev/null 2>&1
     echo -e "\\033[1;31m[✓] All services stopped.\\033[0m"
-    sleep 1.5
+    sleep 1
 }}
 
 restart_services() {{
@@ -412,7 +412,22 @@ update_server() {{
     echo -e "  - Remote Version    : \\033[1;32m$REMOTE_VER\\033[0m"
     
     if [ "$LOCAL_VER" != "$REMOTE_VER" ]; then
-        echo -e "\\033[1;35m[!] New version ($REMOTE_VER) available!\\033[0m"
+        echo -e "\\n\\033[1;35m[!] New version ($REMOTE_VER) available!\\033[0m"
+        echo -e "\\033[1;33m📋 What's new in this release:\\033[0m"
+        python3 -c '
+import urllib.request, json
+try:
+    url = "https://api.github.com/repos/elias0esmail/termux-web-server/commits?per_page=3"
+    req = urllib.request.Request(url, headers={"User-Agent": "Termux"})
+    res = urllib.request.urlopen(req, timeout=5)
+    commits = json.loads(res.read().decode())
+    for c in commits:
+        msg = c["commit"]["message"].split("\n")[0]
+        print("  • " + msg)
+except Exception:
+    print("  • Performance improvements, process stability fixes, and UI updates.")
+'
+        echo ""
         read -p "Download and install update now? (y/N): " confirm
         case "$confirm" in
             [yY][eE][sS]|[yY])
@@ -495,7 +510,7 @@ while true; do
     echo " 3) restart   (Restart all services)"
     echo " 4) update    (Check and apply updates)"
     echo " 5) uninstall (Remove server stack)"
-    echo " 6) exit      (Exit)"
+    echo " 6) exit      (Exit & Stop Server)"
     echo ""
     read -p "Enter choice [1-6]: " choice
 
@@ -505,7 +520,11 @@ while true; do
         3|restart) restart_services ;;
         4|update) update_server ;;
         5|uninstall|delete) uninstall_server ;;
-        6|exit) echo -e "\\033[1;32mExited.\\033[0m"; exit 0 ;;
+        6|exit)
+            stop_services
+            echo -e "\\033[1;32mServer stopped and exited successfully.\\033[0m"
+            exit 0
+            ;;
         *) echo -e "\\033[1;31mInvalid choice!\\033[0m"; sleep 1 ;;
     esac
 done
