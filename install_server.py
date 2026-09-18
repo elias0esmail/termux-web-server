@@ -11,12 +11,12 @@ import string
 from pathlib import Path
 
 # Current Version & Release Notes
-CURRENT_VERSION = "1.5.5"
+CURRENT_VERSION = "1.6.0"
 CHANGELOG = [
-    "Fixed Redis startup crash by allocating dedicated log directory and config file",
-    "Enhanced Redis process detection and background execution stability",
-    "Ensured automatic creation of $PREFIX/var/log directory",
-    "Maintained clean session reload and full English CLI interface"
+    "Fixed Redis process launch by resolving daemonize output redirection conflicts",
+    "Added Option 4 (refresh) to instantly re-check and update server status",
+    "Updated main interactive menu to 7 numbered options",
+    "Enhanced error handling and full English CLI user interface"
 ]
 
 # System and Environment Paths
@@ -374,9 +374,9 @@ start_services() {{
     mkdir -p "$PREFIX/var/lib/redis" "$PREFIX/var/log"
     if ! pgrep -f redis-server > /dev/null; then
         if [ -f "$PREFIX/etc/redis.conf" ]; then
-            redis-server "$PREFIX/etc/redis.conf" > /dev/null 2>&1 &
+            redis-server "$PREFIX/etc/redis.conf" > /dev/null 2>&1
         else
-            redis-server --daemonize yes > /dev/null 2>&1 &
+            redis-server --daemonize yes > /dev/null 2>&1
         fi
     fi
 
@@ -538,22 +538,24 @@ fi
 while true; do
     show_banner_and_status
     echo -e "\\033[1;33mSelect an option:\\033[0m"
-    echo " 1) start     (Start all services)"
-    echo " 2) stop      (Stop all services)"
-    echo " 3) restart   (Restart all services)"
-    echo " 4) update    (Check and apply updates)"
-    echo " 5) uninstall (Remove server stack)"
-    echo " 6) exit      (Exit & Stop Server)"
+    echo " 1) start          (Start all services)"
+    echo " 2) stop           (Stop all services)"
+    echo " 3) restart        (Restart all services)"
+    echo " 4) refresh status (Re-check server status)"
+    echo " 5) update         (Check and apply updates)"
+    echo " 6) uninstall      (Remove server stack)"
+    echo " 7) exit           (Exit & Stop Server)"
     echo ""
-    read -p "Enter choice [1-6]: " choice
+    read -p "Enter choice [1-7]: " choice
 
     case "$choice" in
         1|start) start_services ;;
         2|stop) stop_services ;;
         3|restart) restart_services ;;
-        4|update) update_server ;;
-        5|uninstall|delete) uninstall_server ;;
-        6|exit)
+        4|refresh) continue ;;
+        5|update) update_server ;;
+        6|uninstall|delete) uninstall_server ;;
+        7|exit)
             stop_services
             echo -e "\\033[1;32mServer stopped and exited successfully.\\033[0m"
             exit 0
