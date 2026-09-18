@@ -10,8 +10,15 @@ import random
 import string
 from pathlib import Path
 
-# Current Version
-CURRENT_VERSION = "1.5.2"
+# Current Version & Release Notes
+CURRENT_VERSION = "1.5.3"
+CHANGELOG = [
+    "Embedded release notes extraction directly from updated script file",
+    "Automatic phpMyAdmin update while preserving configuration settings",
+    "Full English interface across all CLI prompts and menus",
+    "Process status verification via background pattern matching",
+    "Seamless server stop and restart lifecycle upon update"
+]
 
 # System and Environment Paths
 PREFIX = Path(os.environ.get('PREFIX', '/data/data/com.termux/files/usr'))
@@ -432,18 +439,20 @@ update_server() {{
         echo -e "\\n\\033[1;35m[!] New version ($REMOTE_VER) available!\\033[0m"
         echo -e "\\033[1;33m📋 What's new in this release:\\033[0m"
         python3 -c '
-import urllib.request, json
+import re
 try:
-    url = "https://api.github.com/repos/elias0esmail/termux-web-server/commits?per_page=3"
-    req = urllib.request.Request(url)
-    req.add_header("User-Agent", "Termux")
-    res = urllib.request.urlopen(req, timeout=5)
-    commits = json.loads(res.read().decode())
-    for c in commits:
-        msg = c["commit"]["message"].split("\n")[0]
-        print("  • " + msg)
+    with open("'"$TMP_UPD"'", "r", encoding="utf-8") as f:
+        content = f.read()
+    match = re.search(r"CHANGELOG\s*=\s*\[(.*?)\]", content, re.DOTALL)
+    if match:
+        items = re.findall(r"[\"'\"](.*?)[\"'\"]", match.group(1))
+        for item in items:
+            if item.strip():
+                print("  • " + item.strip())
+    else:
+        print("  • General fixes, stability improvements, and updates.")
 except Exception:
-    print("  • Performance improvements, process stability fixes, and UI updates.")
+    print("  • General fixes, stability improvements, and updates.")
 '
         echo ""
         read -p "Download and install update now? (y/N): " confirm
