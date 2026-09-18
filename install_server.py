@@ -13,11 +13,11 @@ from pathlib import Path
 # Current Version & Release Notes
 CURRENT_VERSION = "1.5.4"
 CHANGELOG = [
-    "Embedded release notes extraction directly from updated script file",
-    "Automatic phpMyAdmin update while preserving configuration settings",
-    "Full English interface across all CLI prompts and menus",
-    "Process status verification via background pattern matching",
-    "Seamless server stop and restart lifecycle upon update"
+    "Fixed inline python syntax error when parsing release notes",
+    "Eliminated Python 3.12+ regex escape sequence warnings",
+    "Added explicit user prompt before restarting session post-update",
+    "Ensured clean transition to newly updated CLI executable",
+    "Maintained automatic phpMyAdmin updates and full English CLI interface"
 ]
 
 # System and Environment Paths
@@ -439,16 +439,15 @@ update_server() {{
         echo -e "\\n\\033[1;35m[!] New version ($REMOTE_VER) available!\\033[0m"
         echo -e "\\033[1;33m📋 What's new in this release:\\033[0m"
         python3 -c '
-import re
+import ast, re
 try:
     with open("'"$TMP_UPD"'", "r", encoding="utf-8") as f:
         content = f.read()
-    match = re.search(r"CHANGELOG\s*=\s*\[(.*?)\]", content, re.DOTALL)
+    match = re.search(r"CHANGELOG\\s*=\\s*(\\[.*?\\])", content, re.DOTALL)
     if match:
-        items = re.findall(r"[\"'\"](.*?)[\"'\"]", match.group(1))
-        for item in items:
-            if item.strip():
-                print("  • " + item.strip())
+        log_list = ast.literal_eval(match.group(1))
+        for item in log_list:
+            print("  • " + str(item))
     else:
         print("  • General fixes, stability improvements, and updates.")
 except Exception:
@@ -463,9 +462,9 @@ except Exception:
                 echo -e "\\033[1;34m[*] Installing update...\\033[0m"
                 python3 "$TMP_UPD"
                 rm -f "$TMP_UPD"
-                echo -e "\\033[1;32m[✓] Updated to version $REMOTE_VER successfully!\\033[0m"
-                echo -e "\\033[1;36m[*] Launching updated myserver manager...\\033[0m"
-                sleep 1
+                echo -e "\\n\\033[1;32m[✓] Updated to version $REMOTE_VER successfully!\\033[0m"
+                echo -e "\\033[1;36m[*] Press Enter to close this session and launch updated myserver...\\033[0m"
+                read -r
                 exec "$PREFIX/bin/myserver"
                 ;;
             *)
