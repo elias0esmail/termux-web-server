@@ -11,13 +11,12 @@ import string
 from pathlib import Path
 
 # Current Version & Release Notes
-CURRENT_VERSION = "1.5.4"
+CURRENT_VERSION = "1.5.5"
 CHANGELOG = [
-    "Fixed inline python syntax error when parsing release notes",
-    "Eliminated Python 3.12+ regex escape sequence warnings",
-    "Added explicit user prompt before restarting session post-update",
-    "Ensured clean transition to newly updated CLI executable",
-    "Maintained automatic phpMyAdmin updates and full English CLI interface"
+    "Fixed Redis startup crash by allocating dedicated log directory and config file",
+    "Enhanced Redis process detection and background execution stability",
+    "Ensured automatic creation of $PREFIX/var/log directory",
+    "Maintained clean session reload and full English CLI interface"
 ]
 
 # System and Environment Paths
@@ -53,9 +52,14 @@ def setup_mariadb():
 def setup_redis():
     try:
         redis_data = PREFIX / "var/lib/redis"
+        log_dir = PREFIX / "var/log"
         redis_data.mkdir(parents=True, exist_ok=True)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        
         redis_conf = PREFIX / "etc/redis.conf"
-        redis_conf.write_text(f"dir {redis_data}\ndaemonize yes\nport 6379\nbind 127.0.0.1\n")
+        redis_conf_content = f"dir {redis_data}\nport 6379\nbind 127.0.0.1\ndaemonize yes\nlogfile {log_dir}/redis.log\n"
+        redis_conf.write_text(redis_conf_content)
+        
         print("\033[1;32m [✓] Redis configured. \033[0m")
         return True
     except Exception as e:
@@ -367,12 +371,12 @@ start_services() {{
     fi
 
     echo -e "\\033[1;34m[+] Starting Redis...\\033[0m"
-    mkdir -p "$PREFIX/var/lib/redis"
+    mkdir -p "$PREFIX/var/lib/redis" "$PREFIX/var/log"
     if ! pgrep -f redis-server > /dev/null; then
         if [ -f "$PREFIX/etc/redis.conf" ]; then
-            redis-server "$PREFIX/etc/redis.conf" --daemonize yes > /dev/null 2>&1
+            redis-server "$PREFIX/etc/redis.conf" > /dev/null 2>&1 &
         else
-            redis-server --daemonize yes > /dev/null 2>&1
+            redis-server --daemonize yes > /dev/null 2>&1 &
         fi
     fi
 
