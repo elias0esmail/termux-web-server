@@ -11,7 +11,7 @@ import string
 from pathlib import Path
 
 # Current Version
-CURRENT_VERSION = "1.4.0"
+CURRENT_VERSION = "1.4.1"
 
 # System and Environment Paths
 PREFIX = Path(os.environ.get('PREFIX', '/data/data/com.termux/files/usr'))
@@ -420,17 +420,20 @@ update_server() {{
                 python3 "$TMP_UPD"
                 rm -f "$TMP_UPD"
                 echo -e "\\033[1;32m[✓] Updated to version $REMOTE_VER successfully!\\033[0m"
+                read -p "Press Enter to launch updated myserver..."
+                exec "$PREFIX/bin/myserver"
                 ;;
             *)
                 echo -e "\\033[1;33m[i] Update cancelled by user.\\033[0m"
                 rm -f "$TMP_UPD"
+                read -p "Press Enter to continue..."
                 ;;
         esac
     else
         echo -e "\\033[1;32m[✓] You are already on the latest version ($LOCAL_VER).\\033[0m"
         rm -f "$TMP_UPD"
+        read -p "Press Enter to continue..."
     fi
-    read -p "Press Enter to continue..."
 }}
 
 uninstall_server() {{
