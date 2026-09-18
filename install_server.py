@@ -11,7 +11,7 @@ import string
 from pathlib import Path
 
 # Current Version
-CURRENT_VERSION = "1.5.0"
+CURRENT_VERSION = "1.5.1"
 
 # System and Environment Paths
 PREFIX = Path(os.environ.get('PREFIX', '/data/data/com.termux/files/usr'))
@@ -431,11 +431,14 @@ except Exception:
         read -p "Download and install update now? (y/N): " confirm
         case "$confirm" in
             [yY][eE][sS]|[yY])
-                echo -e "\\033[1;34m[*] Updating server...\\033[0m"
+                echo -e "\\033[1;33m[*] Stopping running services before update...\\033[0m"
+                stop_services
+                echo -e "\\033[1;34m[*] Installing update...\\033[0m"
                 python3 "$TMP_UPD"
                 rm -f "$TMP_UPD"
                 echo -e "\\033[1;32m[✓] Updated to version $REMOTE_VER successfully!\\033[0m"
-                read -p "Press Enter to launch updated myserver..."
+                echo -e "\\033[1;36m[*] Launching updated myserver manager...\\033[0m"
+                sleep 1
                 exec "$PREFIX/bin/myserver"
                 ;;
             *)
