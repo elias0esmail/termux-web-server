@@ -11,7 +11,7 @@ import string
 from pathlib import Path
 
 # Current Version & Release Notes
-CURRENT_VERSION = "1.6.2"
+CURRENT_VERSION = "1.6.3"
 CHANGELOG = [
     "Added Developer information section to the CLI status interface",
     "Preserved ARM64 kernel warning bypass for Redis on Android",
@@ -335,6 +335,12 @@ show_banner_and_status() {{
     echo "          __/ |                                  "
     echo "         |___/        Server Manager v{CURRENT_VERSION}  "
     echo -e "\\033[0m"
+
+    echo -e "\\033[1;33m═════════════════ [ DEVELOPER INFO ] ═════════════════\\033[0m"
+    echo -e " 👤 Developer : \\033[1;37mElias Esmail\\033[0m"
+    echo -e " 📱 WhatsApp  : \\033[1;32mhttps://api.whatsapp.com/send?phone=967771902342\\033[0m"
+    echo -e " 🔗 GitHub    : \\033[1;36mhttps://github.com/elias0esmail\\033[0m"
+    echo -e "\\033[1;33m══════════════════════════════════════════════════════\\033[0m\\n"
     
     echo -e "\\033[1;35m═════════════════ [ SERVICES STATUS ] ═════════════════\\033[0m"
     pgrep -f nginx > /dev/null && echo -e " Nginx:    \\033[1;32mRunning [✓]\\033[0m" || echo -e " Nginx:    \\033[1;31mStopped [✗]\\033[0m"
@@ -352,11 +358,6 @@ show_banner_and_status() {{
         echo -e "\\033[1;36m══════════════════════════════════════════════════════════\\033[0m\\n"
     fi
 
-    echo -e "\\033[1;33m═════════════════ [ DEVELOPER INFO ] ═════════════════\\033[0m"
-    echo -e " 👤 Developer : \\033[1;37mElias Esmail\\033[0m"
-    echo -e " 📱 WhatsApp  : \\033[1;32mhttps://api.whatsapp.com/send?phone=967771902342\\033[0m"
-    echo -e " 🔗 GitHub    : \\033[1;36mhttps://github.com/elias0esmail\\033[0m"
-    echo -e "\\033[1;33m══════════════════════════════════════════════════════\\033[0m\\n"
 }}
 
 start_services() {{
