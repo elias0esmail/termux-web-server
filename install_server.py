@@ -11,12 +11,11 @@ import string
 from pathlib import Path
 
 # Current Version & Release Notes
-CURRENT_VERSION = "1.6.0"
+CURRENT_VERSION = "1.6.2"
 CHANGELOG = [
-    "Fixed Redis process launch by resolving daemonize output redirection conflicts",
-    "Added Option 4 (refresh) to instantly re-check and update server status",
-    "Updated main interactive menu to 7 numbered options",
-    "Enhanced error handling and full English CLI user interface"
+    "Added Developer information section to the CLI status interface",
+    "Preserved ARM64 kernel warning bypass for Redis on Android",
+    "Maintained full English interactive interface and session re-exec logic"
 ]
 
 # System and Environment Paths
@@ -57,10 +56,10 @@ def setup_redis():
         log_dir.mkdir(parents=True, exist_ok=True)
         
         redis_conf = PREFIX / "etc/redis.conf"
-        redis_conf_content = f"dir {redis_data}\nport 6379\nbind 127.0.0.1\ndaemonize yes\nlogfile {log_dir}/redis.log\n"
+        redis_conf_content = f"dir {redis_data}\nport 6379\nbind 127.0.0.1\ndaemonize yes\nlogfile {log_dir}/redis.log\nignore-warnings ARM64-COW-BUG\n"
         redis_conf.write_text(redis_conf_content)
         
-        print("\033[1;32m [✓] Redis configured. \033[0m")
+        print("\033[1;32m [✓] Redis configured (ARM64 warning suppressed). \033[0m")
         return True
     except Exception as e:
         print(f"\033[1;31m [!] Redis init error: {e}\033[0m")
@@ -352,6 +351,12 @@ show_banner_and_status() {{
         echo -e " 🗄️  phpMyAdmin   : \\033[1;35mhttp://localhost:8080/phpmyadmin\\033[0m"
         echo -e "\\033[1;36m══════════════════════════════════════════════════════════\\033[0m\\n"
     fi
+
+    echo -e "\\033[1;33m═════════════════ [ DEVELOPER INFO ] ═════════════════\\033[0m"
+    echo -e " 👤 Developer : \\033[1;37mElias Esmail\\033[0m"
+    echo -e " 📱 WhatsApp  : \\033[1;32mhttps://api.whatsapp.com/send?phone=967771902342\\033[0m"
+    echo -e " 🔗 GitHub    : \\033[1;36mhttps://github.com/elias0esmail\\033[0m"
+    echo -e "\\033[1;33m══════════════════════════════════════════════════════\\033[0m\\n"
 }}
 
 start_services() {{
@@ -374,9 +379,12 @@ start_services() {{
     mkdir -p "$PREFIX/var/lib/redis" "$PREFIX/var/log"
     if ! pgrep -f redis-server > /dev/null; then
         if [ -f "$PREFIX/etc/redis.conf" ]; then
+            if ! grep -q "ignore-warnings ARM64-COW-BUG" "$PREFIX/etc/redis.conf"; then
+                echo "ignore-warnings ARM64-COW-BUG" >> "$PREFIX/etc/redis.conf"
+            fi
             redis-server "$PREFIX/etc/redis.conf" > /dev/null 2>&1
         else
-            redis-server --daemonize yes > /dev/null 2>&1
+            redis-server --daemonize yes --ignore-warnings ARM64-COW-BUG > /dev/null 2>&1
         fi
     fi
 
