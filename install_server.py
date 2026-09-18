@@ -11,7 +11,7 @@ import string
 from pathlib import Path
 
 # رقم الإصدار الحالي
-CURRENT_VERSION = "1.3.0"
+CURRENT_VERSION = "1.3.1"
 
 # إعداد مسارات النظام والبيئة
 PREFIX = Path(os.environ.get('PREFIX', '/data/data/com.termux/files/usr'))
@@ -32,8 +32,10 @@ def run_cmd(cmd, check=False):
 def setup_mariadb():
     try:
         data_dir = PREFIX / "var/lib/mysql"
+        run_dir = PREFIX / "var/run/mysqld"
         data_dir.mkdir(parents=True, exist_ok=True)
-        if not any(data_dir.iterdir()):
+        run_dir.mkdir(parents=True, exist_ok=True)
+        if not (data_dir / "mysql").exists():
             run_cmd(f"mariadb-install-db --datadir='{data_dir}'")
             print("\033[1;32m [✓] MariaDB database initialized. \033[0m")
         return True
@@ -46,8 +48,7 @@ def setup_redis():
         redis_data = PREFIX / "var/lib/redis"
         redis_data.mkdir(parents=True, exist_ok=True)
         redis_conf = PREFIX / "etc/redis.conf"
-        if not redis_conf.exists():
-            redis_conf.write_text(f"dir {redis_data}\ndaemonize yes\nport 6379\n")
+        redis_conf.write_text(f"dir {redis_data}\ndaemonize yes\nport 6379\nbind 127.0.0.1\n")
         print("\033[1;32m [✓] Redis configured. \033[0m")
         return True
     except Exception as e:
@@ -318,29 +319,57 @@ show_banner_and_status() {{
 
 start_services() {{
     echo -e "\\033[1;34m[+] بدء تشغيل MariaDB...\\033[0m"
-    mkdir -p "$PREFIX/var/lib/mysql"
-    if command -v mariadbd-safe &> /dev/null; then
-        mariadbd-safe --datadir="$PREFIX/var/lib/mysql" > /dev/null 2>&1 &
-    else
-        mysqld_safe --datadir="$PREFIX/var/lib/mysql" > /dev/null 2>&1 &
+    mkdir -p "$PREFIX/var/lib/mysql" "$PREFIX/var/run/mysqld"
+    if ! pgrep -x mariadbd > /dev/null && ! pgrep -x mysqld > /dev/null; then
+        if [ ! -d "$PREFIX/var/lib/mysql/mysql" ]; then
+            mariadb-install-db --datadir="$PREFIX/var/lib/mysql" > /dev/null 2>&1
+        fi
+        if command -v mariadbd-safe &> /dev/null; then
+            mariadbd-safe --datadir="$PREFIX/var/lib/mysql" > /dev/null 2>&1 &
+        else
+            mysqld_safe --datadir="$PREFIX/var/lib/mysql" > /dev/null 2>&1 &
+        fi
     fi
 
     echo -e "\\033[1;34m[+] بدء تشغيل Redis...\\033[0m"
     mkdir -p "$PREFIX/var/lib/redis"
-    if [ -f "$PREFIX/etc/redis.conf" ]; then
-        redis-server "$PREFIX/etc/redis.conf" --daemonize yes > /dev/null 2>&1
-    else
-        redis-server --daemonize yes > /dev/null 2>&1
+    if ! pgrep -x redis-server > /dev/null; then
+        if [ -f "$PREFIX/etc/redis.conf" ]; then
+            redis-server "$PREFIX/etc/redis.conf" --daemonize yes > /dev/null 2>&1
+        else
+            redis-server --daemonize yes > /dev/null 2>&1
+        fi
     fi
 
     echo -e "\\033[1;34m[+] بدء تشغيل PHP-FPM...\\033[0m"
-    php-fpm > /dev/null 2>&1
+    if ! pgrep -x php-fpm > /dev/null; then
+        php-fpm > /dev/null 2>&1
+    fi
 
     echo -e "\\033[1;34m[+] بدء تشغيل Nginx...\\033[0m"
-    nginx > /dev/null 2>&1
+    if ! pgrep -x nginx > /dev/null; then
+        nginx > /dev/null 2>&1
+    fi
 
-    echo -e "\\033[1;32m[✓] تم تشغيل جميع الخدمات بنجاح.\\033[0m"
-    sleep 1.5
+    sleep 2
+    echo -e "\\033[1;32m[✓] تم تشغيل كافة الخدمات بنجاح.\\033[0m\\n"
+
+    echo -e "\\033[1;36m═════════════════ [ معلومات السيرفر ] ═════════════════\\033[0m"
+    echo -e " 📂 مسار الجذر (Web Root): \\033[1;33m$HTDOCS_DIR\\033[0m"
+    echo -e " 🌐 رابط الموقع (HTTP) : \\033[1;34mhttp://localhost:8080\\033[0m"
+    echo -e " 🔒 رابط الموقع (HTTPS): \\033[1;32mhttps://localhost:8443\\033[0m"
+    echo -e " 🗄️  رابط phpMyAdmin : \\033[1;35mhttp://localhost:8080/phpmyadmin\\033[0m"
+    echo -e "\\033[1;36m═══════════════════════════════════════════════════════\\033[0m\\n"
+
+    echo -e "\\033[1;33m[*] جاري فتح الموقع المشفر على المتصفح تلقائياً...\\033[0m"
+    if command -v termux-open &> /dev/null; then
+        termux-open https://localhost:8443
+    elif command -v xdg-open &> /dev/null; then
+        xdg-open https://localhost:8443
+    fi
+
+    echo ""
+    read -p "اضغط Enter للعودة إلى القائمة وتحديث الحالة..."
 }}
 
 stop_services() {{
@@ -440,7 +469,6 @@ uninstall_server() {{
     esac
 }}
 
-# تنفيذ أمر مباشر إذا طُلِب عبر الوسطاء (مثال: myserver start)
 if [ -n "$1" ]; then
     case "$1" in
         start) start_services ;;
@@ -449,12 +477,11 @@ if [ -n "$1" ]; then
         status) show_banner_and_status; read -p "اضغط Enter للمتابعة..." ;;
         update) update_server ;;
         delete|uninstall) uninstall_server ;;
-        *) echo "الاستخدام: myserver [start|stop|restart|status|update|uninstall]" ;;
+        *) echo "Usage: myserver [start|stop|restart|status|update|uninstall]" ;;
     esac
     exit 0
 fi
 
-# القائمة التفاعلية المستمرة
 while true; do
     show_banner_and_status
     echo -e "\\033[1;33mاختر أحد الخيارات التالية:\\033[0m"
@@ -479,9 +506,9 @@ while true; do
 done
 """
     try:
-        bin_path.write_text(script_content)
+        bin_path.write_text(script_content, encoding='utf-8')
         bin_path.chmod(0o755)
-        print("\033[1;32m [✓] CLI Tool 'myserver' configured with interactive menu. \033[0m")
+        print("\033[1;32m [✓] CLI Tool 'myserver' configured. \033[0m")
         return True
     except Exception as e:
         print(f"\033[1;31m [!] CLI creation error: {e}\033[0m")
