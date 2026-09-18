@@ -111,6 +111,7 @@ After starting the server you can access it from your browser using :
 This project is provided as-is for personal and educational use.
 
 <br/>
+
 <div align="center">
 
 ⭐ If you found this project useful, please give it a star on GitHub! ⭐
