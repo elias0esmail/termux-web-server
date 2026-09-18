@@ -13,12 +13,12 @@ myserver is your own localhost server stack for Android. You can set up Nginx, P
 
 **CLI Use :**
   ***Example : `myserver start`***
-· `myserver start` to start all services (Nginx, PHP-FPM, MariaDB, Redis).
-· `myserver stop` to stop all running services.
-· `myserver restart` to restart the whole server stack.
-· `myserver status` to show the current server status and information.
-· `myserver update` to check and install the latest update.
-· `myserver uninstall` to completely remove the server stack.
+- `myserver start` to start all services (Nginx, PHP-FPM, MariaDB, Redis).
+- `myserver stop` to stop all running services.
+- `myserver restart` to restart the whole server stack.
+- `myserver status` to show the current server status and information.
+- `myserver update` to check and install the latest update.
+- `myserver uninstall` to completely remove the server stack.
 
 **Manual Use :**
 - Type 1 : to start all services.
