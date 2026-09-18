@@ -11,7 +11,7 @@ import string
 from pathlib import Path
 
 # Current Version & Release Notes
-CURRENT_VERSION = "1.5.3"
+CURRENT_VERSION = "1.5.4"
 CHANGELOG = [
     "Embedded release notes extraction directly from updated script file",
     "Automatic phpMyAdmin update while preserving configuration settings",
