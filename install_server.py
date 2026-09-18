@@ -11,7 +11,7 @@ import string
 from pathlib import Path
 
 # Current Version
-CURRENT_VERSION = "1.5.1"
+CURRENT_VERSION = "1.5.2"
 
 # System and Environment Paths
 PREFIX = Path(os.environ.get('PREFIX', '/data/data/com.termux/files/usr'))
@@ -246,28 +246,39 @@ def setup_htdocs():
 
 def install_phpmyadmin():
     pma_dir = HTDOCS_DIR / "phpmyadmin"
-    if pma_dir.exists():
-        print("\033[1;33m [!] phpMyAdmin already installed. \033[0m")
-        return True
+    is_update = pma_dir.exists()
 
     try:
-        print("\033[1;34m [*] Downloading phpMyAdmin... \033[0m")
+        if is_update:
+            print("\033[1;34m [*] Checking and updating phpMyAdmin to latest version... \033[0m")
+        else:
+            print("\033[1;34m [*] Downloading and installing phpMyAdmin... \033[0m")
+
         TMP_DIR.mkdir(parents=True, exist_ok=True)
         tar_file = TMP_DIR / "pma.tar.gz"
         url = "https://www.phpmyadmin.net/downloads/phpMyAdmin-latest-all-languages.tar.gz"
         
         run_cmd(f"curl -sL '{url}' -o '{tar_file}'")
+        if not tar_file.exists() or tar_file.stat().st_size == 0:
+            print("\033[1;31m [!] Failed to download phpMyAdmin. \033[0m")
+            return False
+
+        config_file = pma_dir / "config.inc.php"
+        saved_config = None
+        if is_update and config_file.exists():
+            saved_config = config_file.read_text()
+
         pma_dir.mkdir(parents=True, exist_ok=True)
         run_cmd(f"tar -xf '{tar_file}' -C '{pma_dir}' --strip-components=1")
         if tar_file.exists():
             tar_file.unlink()
 
         config_sample = pma_dir / "config.sample.inc.php"
-        config_file = pma_dir / "config.inc.php"
 
-        secret = ''.join(random.choices(string.ascii_letters + string.digits, k=32))
-
-        if config_sample.exists():
+        if saved_config:
+            config_file.write_text(saved_config)
+        elif config_sample.exists():
+            secret = ''.join(random.choices(string.ascii_letters + string.digits, k=32))
             content = config_sample.read_text()
             content = re.sub(r"\$cfg\['blowfish_secret'\]\s*=\s*'';|\$cfg\['blowfish_secret'\]\s*=\s*\".*\";", f"$cfg['blowfish_secret'] = '{secret}';", content)
             content = re.sub(r"\$cfg\['Servers'\]\[\$i\]\['AllowNoPassword'\]\s*=\s*false;", "$cfg['Servers'][$i]['AllowNoPassword'] = true;", content)
@@ -279,7 +290,13 @@ def install_phpmyadmin():
             
             config_file.write_text(content)
 
-        print("\033[1;32m [✓] phpMyAdmin installed with login configuration. \033[0m")
+        pma_tmp = pma_dir / "tmp"
+        pma_tmp.mkdir(exist_ok=True)
+
+        if is_update:
+            print("\033[1;32m [✓] phpMyAdmin updated to latest version successfully. \033[0m")
+        else:
+            print("\033[1;32m [✓] phpMyAdmin installed with login configuration. \033[0m")
         return True
     except Exception as e:
         print(f"\033[1;31m [!] phpMyAdmin error: {e}\033[0m")
@@ -418,7 +435,8 @@ update_server() {{
 import urllib.request, json
 try:
     url = "https://api.github.com/repos/elias0esmail/termux-web-server/commits?per_page=3"
-    req = urllib.request.Request(url, headers={"User-Agent": "Termux"})
+    req = urllib.request.Request(url)
+    req.add_header("User-Agent", "Termux")
     res = urllib.request.urlopen(req, timeout=5)
     commits = json.loads(res.read().decode())
     for c in commits:
