@@ -11,11 +11,12 @@ import string
 from pathlib import Path
 
 # Current Version & Release Notes
-CURRENT_VERSION = "1.8.0"
+CURRENT_VERSION = "1.9.0"
 CHANGELOG = [
-    "Refactored Option 5 (fix) to wipe all configs, version info, and binaries except htdocs, then update packages and reinstall completely",
-    "Enhanced update & cleanup workflows for complete server state resets",
-    "Maintained automatic HTTPS launch, ARM64 Redis fix, and full 8-option CLI menu"
+    "Added automatic .htaccess file creation in web root directory",
+    "Implemented silent background update checks on 'myserver' execution",
+    "Added internet connectivity check to bypass update delays when offline",
+    "Maintained automatic HTTPS launch, ARM64 Redis fix, and full CLI features"
 ]
 
 # System and Environment Paths
@@ -165,6 +166,10 @@ http {{
             include fastcgi_params;
             fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
         }}
+
+        location ~ /\\.ht {{
+            deny all;
+        }}
     }}
 
     # HTTPS Server (Port 8443)
@@ -190,6 +195,10 @@ http {{
             fastcgi_index index.php;
             include fastcgi_params;
             fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        }}
+
+        location ~ /\\.ht {{
+            deny all;
         }}
     }}
 }}
@@ -250,6 +259,20 @@ def setup_htdocs():
         if not index_file.exists():
             index_file.write_text("<?php echo '<h1>Nginx + PHP-FPM Server is Running!</h1>'; ?>")
         
+        htaccess_file = HTDOCS_DIR / ".htaccess"
+        if not htaccess_file.exists():
+            htaccess_content = """# Default Apache / Nginx Fallback .htaccess Configuration
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteBase /
+    RewriteCond %{REQUEST_FILENAME} !-f
+    RewriteCond %{REQUEST_FILENAME} !-d
+    RewriteRule ^ index.php [L]
+</IfModule>
+"""
+            htaccess_file.write_text(htaccess_content)
+            print("\033[1;32m [✓] Default .htaccess file created in root htdocs. \033[0m")
+
         info_dir = HTDOCS_DIR / "phpinfo"
         info_dir.mkdir(exist_ok=True)
         (info_dir / "index.php").write_text("<?php phpinfo(); ?>")
@@ -327,6 +350,67 @@ HOME_DIR="{HOME}"
 HTDOCS_DIR="{HTDOCS_DIR}"
 VERSION_FILE="{VERSION_FILE}"
 GITHUB_RAW_URL="{GITHUB_RAW_URL}"
+
+check_auto_update() {{
+    # Check internet connection silently with 2 sec timeout
+    if ping -c 1 -W 2 8.8.8.8 > /dev/null 2>&1 || curl -s --connect-timeout 2 https://www.google.com > /dev/null 2>&1; then
+        LOCAL_VER=$(cat "$VERSION_FILE" 2>/dev/null || echo "{CURRENT_VERSION}")
+        TMP_AUTO_UPD="$PREFIX/tmp/install_server_auto_check.py"
+        mkdir -p "$PREFIX/tmp"
+        
+        curl -sL --connect-timeout 3 "$GITHUB_RAW_URL/install_server.py" -o "$TMP_AUTO_UPD"
+        
+        if [ -s "$TMP_AUTO_UPD" ]; then
+            REMOTE_VER=$(grep -oP 'CURRENT_VERSION\\s*=\\s*"\\K[^"]+' "$TMP_AUTO_UPD" 2>/dev/null || echo "$LOCAL_VER")
+            
+            if [ "$LOCAL_VER" != "$REMOTE_VER" ] && [ "$REMOTE_VER" != "0.0.0" ]; then
+                echo -e "\\n\\033[1;35m══════════════════════════════════════════════════════\\033[0m"
+                echo -e "\\033[1;33m 🚀 NEW UPDATE AVAILABLE: Version $REMOTE_VER (Current: $LOCAL_VER)\\033[0m"
+                echo -e "\\033[1;35m══════════════════════════════════════════════════════\\033[0m"
+                echo -e "\\033[1;36m📋 Release Details & What's New:\\033[0m"
+                python3 -c '
+import ast, re
+try:
+    with open("'"$TMP_AUTO_UPD"'", "r", encoding="utf-8") as f:
+        content = f.read()
+    match = re.search(r"CHANGELOG\\s*=\\s*(\\[.*?\\])", content, re.DOTALL)
+    if match:
+        log_list = ast.literal_eval(match.group(1))
+        for item in log_list:
+            print("  • " + str(item))
+    else:
+        print("  • General fixes, stability improvements, and updates.")
+except Exception:
+    print("  • General fixes, stability improvements, and updates.")
+'
+                echo ""
+                read -p "Would you like to install this update now? (y/N): " confirm_update
+                case "$confirm_update" in
+                    [yY][eE][sS]|[yY])
+                        echo -e "\\033[1;33m[*] Stopping running services before update...\\033[0m"
+                        stop_services
+                        echo -e "\\033[1;34m[*] Installing update...\\033[0m"
+                        python3 "$TMP_AUTO_UPD"
+                        rm -f "$TMP_AUTO_UPD"
+                        echo -e "\\n\\033[1;32m[✓] Updated to version $REMOTE_VER successfully!\\033[0m"
+                        echo -e "\\033[1;36m[*] Press Enter to launch updated myserver manager...\\033[0m"
+                        read -r
+                        exec "$PREFIX/bin/myserver"
+                        ;;
+                    *)
+                        echo -e "\\033[1;33m[i] Update postponed. Starting server manager...\\033[0m\\n"
+                        rm -f "$TMP_AUTO_UPD"
+                        sleep 1
+                        ;;
+                esac
+            else
+                rm -f "$TMP_AUTO_UPD"
+            fi
+        else
+            rm -f "$TMP_AUTO_UPD"
+        fi
+    fi
+}}
 
 show_banner_and_status() {{
     clear
@@ -577,6 +661,11 @@ uninstall_server() {{
             ;;
     esac
 }}
+
+# Perform Silent Auto-Update Check on launch if no command arguments passed
+if [ -z "$1" ]; then
+    check_auto_update
+fi
 
 if [ -n "$1" ]; then
     case "$1" in
