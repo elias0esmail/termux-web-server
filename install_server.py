@@ -11,7 +11,7 @@ import string
 from pathlib import Path
 
 # Current Version & Release Notes
-CURRENT_VERSION = "2.8.1"
+CURRENT_VERSION = "2.8.2"
 CHANGELOG = [
     "Added cloudflared installation for public tunnel support",
     "Added Global URL field to server information panel",
