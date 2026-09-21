@@ -11,11 +11,11 @@ import string
 from pathlib import Path
 
 # Current Version & Release Notes
-CURRENT_VERSION = "1.6.5"
+CURRENT_VERSION = "1.7.0"
 CHANGELOG = [
-    "Reverted start action to automatically launch HTTPS (https://localhost:8443) in browser",
-    "Enhanced uninstall process to automatically remove exported shared SSL certificate (server.crt)",
-    "Maintained full English CLI interface and ARM64 Redis warning suppression"
+    "Added Option 5 (fix) to repair server stack and update phpMyAdmin without touching web root",
+    "Expanded main CLI menu to 8 numbered options",
+    "Maintained automatic HTTPS launch, ARM64 Redis fix, and CA certificate cleanup on uninstall"
 ]
 
 # System and Environment Paths
@@ -246,7 +246,9 @@ extension=gd
 def setup_htdocs():
     try:
         HTDOCS_DIR.mkdir(parents=True, exist_ok=True)
-        (HTDOCS_DIR / "index.php").write_text("<?php echo '<h1>Nginx + PHP-FPM Server is Running!</h1>'; ?>")
+        index_file = HTDOCS_DIR / "index.php"
+        if not index_file.exists():
+            index_file.write_text("<?php echo '<h1>Nginx + PHP-FPM Server is Running!</h1>'; ?>")
         
         info_dir = HTDOCS_DIR / "phpinfo"
         info_dir.mkdir(exist_ok=True)
@@ -430,6 +432,33 @@ restart_services() {{
     start_services
 }}
 
+fix_server() {{
+    echo -e "\\033[1;33m[*] Initiating server repair stack without deleting web root...\\033[0m"
+    stop_services
+    
+    echo -e "\\033[1;33m[*] Removing old configurations, SSL certs, and temporaries...\\033[0m"
+    rm -rf "$PREFIX/etc/nginx/ssl"
+    rm -f "$HOME/storage/shared/server.crt"
+    rm -f "$PREFIX/etc/nginx/nginx.conf"
+    rm -f "$PREFIX/etc/php-fpm.d/www.conf"
+    
+    mkdir -p "$PREFIX/tmp"
+    TMP_FIX="$PREFIX/tmp/install_server_fix.py"
+    curl -sL "$GITHUB_RAW_URL/install_server.py" -o "$TMP_FIX"
+    
+    if [ -s "$TMP_FIX" ]; then
+        echo -e "\\033[1;34m[*] Re-running setup and updating phpMyAdmin...\\033[0m"
+        python3 "$TMP_FIX"
+        rm -f "$TMP_FIX"
+    else
+        echo -e "\\033[1;34m[*] Local repair executing...\\033[0m"
+        python3 -c "import install_server; install_server.main()" 2>/dev/null || true
+    fi
+    
+    echo -e "\\n\\033[1;32m[✓] Server repaired successfully while preserving $HTDOCS_DIR!\\033[0m"
+    read -p "Press Enter to continue..."
+}}
+
 update_server() {{
     echo -e "\\033[1;36m[*] Checking for updates from remote repository...\\033[0m"
     LOCAL_VER=$(cat "$VERSION_FILE" 2>/dev/null || echo "{CURRENT_VERSION}")
@@ -540,9 +569,10 @@ if [ -n "$1" ]; then
         stop) stop_services ;;
         restart) restart_services ;;
         status) show_banner_and_status; read -p "Press Enter to continue..." ;;
+        fix) fix_server ;;
         update) update_server ;;
         delete|uninstall) uninstall_server ;;
-        *) echo "Usage: myserver [start|stop|restart|status|update|uninstall]" ;;
+        *) echo "Usage: myserver [start|stop|restart|status|fix|update|uninstall]" ;;
     esac
     exit 0
 fi
@@ -554,20 +584,22 @@ while true; do
     echo " 2) stop           (Stop all services)"
     echo " 3) restart        (Restart all services)"
     echo " 4) refresh status (Re-check server status)"
-    echo " 5) update         (Check and apply updates)"
-    echo " 6) uninstall      (Remove server stack)"
-    echo " 7) exit           (Exit & Stop Server)"
+    echo " 5) fix            (Re-install server & update phpMyAdmin without deleting htdocs)"
+    echo " 6) update         (Check and apply updates)"
+    echo " 7) uninstall      (Remove server stack)"
+    echo " 8) exit           (Exit & Stop Server)"
     echo ""
-    read -p "Enter choice [1-7]: " choice
+    read -p "Enter choice [1-8]: " choice
 
     case "$choice" in
         1|start) start_services ;;
         2|stop) stop_services ;;
         3|restart) restart_services ;;
         4|refresh) continue ;;
-        5|update) update_server ;;
-        6|uninstall|delete) uninstall_server ;;
-        7|exit)
+        5|fix) fix_server ;;
+        6|update) update_server ;;
+        7|uninstall|delete) uninstall_server ;;
+        8|exit)
             stop_services
             echo -e "\\033[1;32mServer stopped and exited successfully.\\033[0m"
             exit 0
