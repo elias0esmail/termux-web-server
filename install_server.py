@@ -11,12 +11,13 @@ import string
 from pathlib import Path
 
 # Current Version & Release Notes
-CURRENT_VERSION = "1.9.0"
+CURRENT_VERSION = "2.0.0"
 CHANGELOG = [
-    "Added automatic .htaccess file creation in web root directory",
-    "Implemented silent background update checks on 'myserver' execution",
-    "Added internet connectivity check to bypass update delays when offline",
-    "Maintained automatic HTTPS launch, ARM64 Redis fix, and full CLI features"
+    "Added cloudflared package installation and support",
+    "Added Global URL feature via Cloudflare Tunnel with dynamic toggle option",
+    "Fixed MariaDB process termination issues when stopping services",
+    "Fixed Nginx start failures and connection refused errors",
+    "Updated CLI menu structure with status validation for Internet Access"
 ]
 
 # System and Environment Paths
@@ -28,6 +29,8 @@ PHP_FPM_DIR = PREFIX / "etc/php-fpm.d"
 SSL_DIR = NGINX_DIR / "ssl"
 TMP_DIR = PREFIX / "tmp"
 VERSION_FILE = PREFIX / "etc/myserver_version"
+TUNNEL_LOG = TMP_DIR / "cloudflared.log"
+TUNNEL_URL_FILE = TMP_DIR / "cloudflared_url.txt"
 REPO_DIR = Path(__file__).resolve().parent
 
 GITHUB_RAW_URL = "https://raw.githubusercontent.com/elias0esmail/termux-web-server/main"
@@ -136,9 +139,15 @@ def setup_nginx():
         conf_path = NGINX_DIR / "nginx.conf"
         cert_path = SSL_DIR / "server.crt"
         key_path = SSL_DIR / "server.key"
+        
+        # Ensure log directories exist
+        (PREFIX / "var/log/nginx").mkdir(parents=True, exist_ok=True)
 
         nginx_config = f"""\
 worker_processes 2;
+pid {PREFIX}/var/run/nginx.pid;
+error_log {PREFIX}/var/log/nginx/error.log info;
+
 events {{ worker_connections 1024; }}
 
 http {{
@@ -147,6 +156,7 @@ http {{
     sendfile on;
     keepalive_timeout 65;
     gzip on;
+    access_log {PREFIX}/var/log/nginx/access.log;
 
     # HTTP Server (Port 8080)
     server {{
@@ -350,9 +360,10 @@ HOME_DIR="{HOME}"
 HTDOCS_DIR="{HTDOCS_DIR}"
 VERSION_FILE="{VERSION_FILE}"
 GITHUB_RAW_URL="{GITHUB_RAW_URL}"
+TUNNEL_LOG="$PREFIX/tmp/cloudflared.log"
+TUNNEL_URL_FILE="$PREFIX/tmp/cloudflared_url.txt"
 
 check_auto_update() {{
-    # Check internet connection silently with 2 sec timeout
     if ping -c 1 -W 2 8.8.8.8 > /dev/null 2>&1 || curl -s --connect-timeout 2 https://www.google.com > /dev/null 2>&1; then
         LOCAL_VER=$(cat "$VERSION_FILE" 2>/dev/null || echo "{CURRENT_VERSION}")
         TMP_AUTO_UPD="$PREFIX/tmp/install_server_auto_check.py"
@@ -420,7 +431,7 @@ show_banner_and_status() {{
     echo " | \\  / |0_ _| (___   ___  _ __ __   _____ _ __ "
     echo " | |\\/| | | | |\\___ \\ / _ \\| '__|\\ \\ / / _ \\ '__|"
     echo " | |  | | |_| |____) |  __/| |    \\ V /  __/ |   "
-    echo " |_|  |_|\\__, |_____/ \\___||_|     \\_/ \\___|_|   "
+    echo " |_|  |_|\\__, |_____/ \\___|_|     \\_/ \\___|_|   "
     echo "          __/ |                                  "
     echo "         |___/        Server Manager v{CURRENT_VERSION}  "
     echo -e "\\033[0m"
@@ -432,27 +443,33 @@ show_banner_and_status() {{
     echo -e "\\033[1;33m══════════════════════════════════════════════════════\\033[0m\\n"
     
     echo -e "\\033[1;35m═════════════════ [ SERVICES STATUS ] ═════════════════\\033[0m"
-    pgrep -f nginx > /dev/null && echo -e " Nginx:    \\033[1;32mRunning [✓]\\033[0m" || echo -e " Nginx:    \\033[1;31mStopped [✗]\\033[0m"
-    pgrep -f php-fpm > /dev/null && echo -e " PHP-FPM:  \\033[1;32mRunning [✓]\\033[0m" || echo -e " PHP-FPM:  \\033[1;31mStopped [✗]\\033[0m"
-    pgrep -f "mariadb|mysqld" > /dev/null && echo -e " MariaDB:  \\033[1;32mRunning [✓]\\033[0m" || echo -e " MariaDB:  \\033[1;31mStopped [✗]\\033[0m"
-    pgrep -f redis-server > /dev/null && echo -e " Redis:    \\033[1;32mRunning [✓]\\033[0m" || echo -e " Redis:    \\033[1;31mStopped [✗]\\033[0m"
+    pgrep -f "nginx" > /dev/null && echo -e " Nginx:    \\033[1;32mRunning [✓]\\033[0m" || echo -e " Nginx:    \\033[1;31mStopped [✗]\\033[0m"
+    pgrep -f "php-fpm" > /dev/null && echo -e " PHP-FPM:  \\033[1;32mRunning [✓]\\033[0m" || echo -e " PHP-FPM:  \\033[1;31mStopped [✗]\\033[0m"
+    pgrep -f "mariadbd|mysqld" > /dev/null && echo -e " MariaDB:  \\033[1;32mRunning [✓]\\033[0m" || echo -e " MariaDB:  \\033[1;31mStopped [✗]\\033[0m"
+    pgrep -f "redis-server" > /dev/null && echo -e " Redis:    \\033[1;32mRunning [✓]\\033[0m" || echo -e " Redis:    \\033[1;31mStopped [✗]\\033[0m"
     echo -e "\\033[1;35m═══════════════════════════════════════════════════════\\033[0m\\n"
 
-    if pgrep -f nginx > /dev/null || pgrep -f php-fpm > /dev/null || pgrep -f "mariadb|mysqld" > /dev/null || pgrep -f redis-server > /dev/null; then
+    if pgrep -f "nginx" > /dev/null || pgrep -f "php-fpm" > /dev/null || pgrep -f "mariadbd|mysqld" > /dev/null || pgrep -f "redis-server" > /dev/null; then
         echo -e "\\033[1;36m═════════════════ [ SERVER INFORMATION ] ═════════════════\\033[0m"
         echo -e " 📂 Web Root Path : \\033[1;33m$HTDOCS_DIR\\033[0m"
         echo -e " 🌐 HTTP URL     : \\033[1;34mhttp://localhost:8080\\033[0m"
         echo -e " 🔒 HTTPS URL    : \\033[1;32mhttps://localhost:8443\\033[0m"
         echo -e " 🗄️  phpMyAdmin   : \\033[1;35mhttp://localhost:8080/phpmyadmin\\033[0m"
+        
+        if pgrep -f "cloudflared tunnel" > /dev/null && [ -s "$TUNNEL_URL_FILE" ]; then
+            G_URL=$(cat "$TUNNEL_URL_FILE")
+            echo -e " 🌍 Global URL    : \\033[1;32m$G_URL\\033[0m"
+        else
+            echo -e " 🌍 Global URL    : \\033[1;31mdisable\\033[0m"
+        fi
         echo -e "\\033[1;36m══════════════════════════════════════════════════════════\\033[0m\\n"
     fi
-
 }}
 
 start_services() {{
     echo -e "\\033[1;34m[+] Starting MariaDB...\\033[0m"
     mkdir -p "$PREFIX/var/lib/mysql" "$PREFIX/var/run"
-    if ! pgrep -f "mariadb|mysqld" > /dev/null; then
+    if ! pgrep -f "mariadbd|mysqld" > /dev/null; then
         if [ ! -d "$PREFIX/var/lib/mysql/mysql" ]; then
             mariadb-install-db --datadir="$PREFIX/var/lib/mysql" > /dev/null 2>&1
         fi
@@ -485,6 +502,7 @@ start_services() {{
 
     echo -e "\\033[1;34m[+] Starting Nginx...\\033[0m"
     if ! pgrep -f nginx > /dev/null; then
+        mkdir -p "$PREFIX/var/log/nginx" "$PREFIX/var/run"
         nginx > /dev/null 2>&1
     fi
 
@@ -502,13 +520,75 @@ start_services() {{
 
 stop_services() {{
     echo -e "\\033[1;33m[*] Stopping all services...\\033[0m"
-    pkill -f nginx > /dev/null 2>&1
-    pkill -f php-fpm > /dev/null 2>&1
-    pkill -f redis-server > /dev/null 2>&1
-    pkill -f mysqld > /dev/null 2>&1
-    pkill -f mariadbd > /dev/null 2>&1
+    stop_internet_access_silent
+    pkill -9 -f nginx > /dev/null 2>&1
+    pkill -9 -f php-fpm > /dev/null 2>&1
+    pkill -9 -f redis-server > /dev/null 2>&1
+    pkill -9 -f mariadbd > /dev/null 2>&1
+    pkill -9 -f mysqld > /dev/null 2>&1
+    pkill -9 -f mariadb > /dev/null 2>&1
     echo -e "\\033[1;31m[✓] All services stopped.\\033[0m"
     sleep 1
+}}
+
+toggle_internet_access() {{
+    if pgrep -f "cloudflared tunnel" > /dev/null; then
+        stop_internet_access
+    else
+        start_internet_access
+    fi
+}}
+
+start_internet_access() {{
+    if ! pgrep -f "nginx" > /dev/null && ! pgrep -f "php-fpm" > /dev/null; then
+        echo -e "\\033[1;31m[!] يجب عليك تشغيل السيرفر أولاً قبل تفعيل هذه الخدمة.\\033[0m"
+        read -p "Press Enter to continue..."
+        return
+    fi
+
+    if ! ping -c 1 -W 2 8.8.8.8 > /dev/null 2>&1 && ! curl -s --connect-timeout 2 https://www.google.com > /dev/null 2>&1; then
+        echo -e "\\033[1;31m[!] يجب أن يتوفر وصول للإنترنت لتفعيل هذه الخدمة.\\033[0m"
+        read -p "Press Enter to continue..."
+        return
+    fi
+
+    echo -e "\\033[1;34m[*] Enabling Internet Access via Cloudflare Tunnel...\\033[0m"
+    mkdir -p "$PREFIX/tmp"
+    rm -f "$TUNNEL_LOG" "$TUNNEL_URL_FILE"
+
+    cloudflared tunnel --url http://localhost:8080 > "$TUNNEL_LOG" 2>&1 &
+    
+    echo -n "  Fetching Global URL"
+    for i in {{1..15}}; do
+        echo -n "."
+        sleep 1
+        if grep -q "trycloudflare.com" "$TUNNEL_LOG"; then
+            G_URL=$(grep -o 'https://[-a-zA-Z0-9@:%._\+~#=]\+\.trycloudflare\.com' "$TUNNEL_LOG" | head -n 1)
+            if [ -n "$G_URL" ]; then
+                echo "$G_URL" > "$TUNNEL_URL_FILE"
+                echo -e "\\n\\033[1;32m[✓] Global Access Enabled Successfully!\\033[0m"
+                echo -e " 🌍 Global URL: \\033[1;36m$G_URL\\033[0m"
+                read -p "Press Enter to continue..."
+                return
+            fi
+        fi
+    done
+
+    echo -e "\\n\\033[1;31m[!] Failed to establish Cloudflare Tunnel. Please try again.\\033[0m"
+    stop_internet_access_silent
+    read -p "Press Enter to continue..."
+}}
+
+stop_internet_access() {{
+    echo -e "\\033[1;33m[*] Disabling Internet Access...\\033[0m"
+    stop_internet_access_silent
+    echo -e "\\033[1;32m[✓] Internet Access disabled.\\033[0m"
+    sleep 1
+}}
+
+stop_internet_access_silent() {{
+    pkill -9 -f "cloudflared tunnel" > /dev/null 2>&1
+    rm -f "$TUNNEL_LOG" "$TUNNEL_URL_FILE"
 }}
 
 restart_services() {{
@@ -662,7 +742,6 @@ uninstall_server() {{
     esac
 }}
 
-# Perform Silent Auto-Update Check on launch if no command arguments passed
 if [ -z "$1" ]; then
     check_auto_update
 fi
@@ -684,26 +763,34 @@ fi
 while true; do
     show_banner_and_status
     echo -e "\\033[1;33mSelect an option:\\033[0m"
-    echo " 1) start          (Start all services)"
-    echo " 2) stop           (Stop all services)"
-    echo " 3) restart        (Restart all services)"
-    echo " 4) refresh status (Re-check server status)"
-    echo " 5) fix            (To fix issues)"
-    echo " 6) update         (Check and apply updates)"
-    echo " 7) uninstall      (Remove server stack)"
-    echo " 8) exit           (Exit & Stop Server)"
+    echo " 1) start"
+    echo " 2) stop"
+    
+    if pgrep -f "cloudflared tunnel" > /dev/null && [ -s "$TUNNEL_URL_FILE" ]; then
+        echo " 3) Disable Internet Access"
+    else
+        echo " 3) Enable Internet Access"
+    fi
+    
+    echo " 4) restart"
+    echo " 5) refresh status"
+    echo " 6) fix"
+    echo " 7) update"
+    echo " 8) uninstall"
+    echo " 9) exit"
     echo ""
-    read -p "Enter choice [1-8]: " choice
+    read -p "Enter choice [1-9]: " choice
 
     case "$choice" in
-        1|start) start_services ;;
-        2|stop) stop_services ;;
-        3|restart) restart_services ;;
-        4|refresh) continue ;;
-        5|fix) fix_server ;;
-        6|update) update_server ;;
-        7|uninstall|delete) uninstall_server ;;
-        8|exit)
+        1) start_services ;;
+        2) stop_services ;;
+        3) toggle_internet_access ;;
+        4) restart_services ;;
+        5|refresh) continue ;;
+        6) fix_server ;;
+        7) update_server ;;
+        8|uninstall|delete) uninstall_server ;;
+        9|exit)
             stop_services
             echo -e "\\033[1;32mServer stopped and exited successfully.\\033[0m"
             exit 0
@@ -740,7 +827,7 @@ def main():
         steps = [
             ("Updating Packages", "pkg update -y && pkg upgrade -y"),
             ("Storage Setup", None),
-            ("Installing Core Software", "pkg install -y nginx php php-fpm mariadb redis openssl-tool curl tar git wget"),
+            ("Installing Core Software & Cloudflared", "pkg install -y nginx php php-fpm mariadb redis openssl-tool curl tar git wget cloudflared"),
             ("MariaDB Initialization", setup_mariadb),
             ("Redis Setup", setup_redis),
             ("PHP-FPM Configuration", setup_php_fpm),
