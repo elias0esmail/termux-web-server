@@ -11,12 +11,11 @@ import string
 from pathlib import Path
 
 # Current Version & Release Notes
-CURRENT_VERSION = "2.0.3"
+CURRENT_VERSION = "2.0.4"
 CHANGELOG = [
-    "Fixed Nginx configuration syntax error caused by unescaped variable in f-string",
-    "Shortened option 2 menu text to Enable/Disable Internet with description",
-    "Updated menu UI colors for all options to yellow",
-    "Maintained Cloudflare Tunnel and PHP 8.x/Python 3.12+ compatibility"
+    "Fixed python3 -c inline script syntax error when parsing CURRENT_VERSION",
+    "Escaped internal quotes in Bash check_auto_update and update_server functions",
+    "Resolved empty Remote Version display bug during update check"
 ]
 
 # System and Environment Paths
@@ -384,7 +383,7 @@ check_auto_update() {{
 import re
 try:
     with open("'"$TMP_AUTO_UPD"'", "r", encoding="utf-8") as f:
-        m = re.search(r"CURRENT_VERSION\\s*=\\s*\"([^\"]+)\"", f.read())
+        m = re.search(r"CURRENT_VERSION\s*=\s*[\"'\']([^\"'\']+)[\"'\']", f.read())
         print(m.group(1) if m else "'"$LOCAL_VER"'")
 except Exception:
     print("'"$LOCAL_VER"'")
@@ -400,7 +399,7 @@ import ast, re
 try:
     with open("'"$TMP_AUTO_UPD"'", "r", encoding="utf-8") as f:
         content = f.read()
-    match = re.search(r"CHANGELOG\\s*=\\s*(\\[.*?\\])", content, re.DOTALL)
+    match = re.search(r"CHANGELOG\s*=\s*(\\[.*?\\])", content, re.DOTALL)
     if match:
         log_list = ast.literal_eval(match.group(1))
         for item in log_list:
@@ -662,7 +661,7 @@ update_server() {{
 import re
 try:
     with open("'"$TMP_UPD"'", "r", encoding="utf-8") as f:
-        m = re.search(r"CURRENT_VERSION\\s*=\\s*\"([^\"]+)\"", f.read())
+        m = re.search(r"CURRENT_VERSION\s*=\s*[\"'\']([^\"'\']+)[\"'\']", f.read())
         print(m.group(1) if m else "'"$LOCAL_VER"'")
 except Exception:
     print("'"$LOCAL_VER"'")
@@ -671,7 +670,7 @@ except Exception:
     echo -e "  - Installed Version : \\033[1;33m$LOCAL_VER\\033[0m"
     echo -e "  - Remote Version    : \\033[1;32m$REMOTE_VER\\033[0m"
     
-    if [ "$LOCAL_VER" != "$REMOTE_VER" ]; then
+    if [ "$LOCAL_VER" != "$REMOTE_VER" ] && [ -n "$REMOTE_VER" ]; then
         echo -e "\\n\\033[1;35m[!] New version ($REMOTE_VER) available!\\033[0m"
         echo -e "\\033[1;33m📋 What's new in this release:\\033[0m"
         python3 -c '
@@ -679,7 +678,7 @@ import ast, re
 try:
     with open("'"$TMP_UPD"'", "r", encoding="utf-8") as f:
         content = f.read()
-    match = re.search(r"CHANGELOG\\s*=\\s*(\\[.*?\\])", content, re.DOTALL)
+    match = re.search(r"CHANGELOG\s*=\s*(\\[.*?\\])", content, re.DOTALL)
     if match:
         log_list = ast.literal_eval(match.group(1))
         for item in log_list:
