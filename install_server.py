@@ -584,7 +584,7 @@ while true; do
     echo " 2) stop           (Stop all services)"
     echo " 3) restart        (Restart all services)"
     echo " 4) refresh status (Re-check server status)"
-    echo " 5) fix            (Re-install server & update phpMyAdmin without deleting htdocs)"
+    echo " 5) fix            (Re-install server to To fix issues)"
     echo " 6) update         (Check and apply updates)"
     echo " 7) uninstall      (Remove server stack)"
     echo " 8) exit           (Exit & Stop Server)"
