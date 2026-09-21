@@ -11,11 +11,11 @@ import string
 from pathlib import Path
 
 # Current Version & Release Notes
-CURRENT_VERSION = "2.0.2"
+CURRENT_VERSION = "2.0.3"
 CHANGELOG = [
-    "Restored stable service startup commands from v1.6.3",
-    "Fixed update checker regex matching to prevent false update prompts",
-    "Fixed CURRENT_VERSION variable evaluation in Bash CLI script",
+    "Fixed Nginx configuration syntax error caused by unescaped variable in f-string",
+    "Shortened option 2 menu text to Enable/Disable Internet with description",
+    "Updated menu UI colors for all options to yellow",
     "Maintained Cloudflare Tunnel and PHP 8.x/Python 3.12+ compatibility"
 ]
 
@@ -166,7 +166,7 @@ http {{
         index index.php index.html;
 
         location / {{
-            try_files $uri $uri/ /index.php?$query_string;
+            try_files $uri $uri/ /index.php?$args;
         }}
 
         location ~ \\.php$ {{
@@ -196,7 +196,7 @@ http {{
         index index.php index.html;
 
         location / {{
-            try_files $uri $uri/ /index.php?$query_string;
+            try_files $uri $uri/ /index.php?$args;
         }}
 
         location ~ \\.php$ {{
@@ -782,23 +782,23 @@ while true; do
     echo -e "\\033[1;33mSelect an option:\\033[0m"
     
     if check_server_running; then
-        echo " 1) stop           (Stop all services)"
+        echo -e "\\033[1;33m 1) stop           (Stop all services)\\033[0m"
     else
-        echo " 1) start          (Start all services)"
+        echo -e "\\033[1;33m 1) start          (Start all services)\\033[0m"
     fi
     
     if pgrep -f "cloudflared tunnel" > /dev/null && [ -s "$TUNNEL_URL_FILE" ]; then
-        echo " 2) Disable Internet Access"
+        echo -e "\\033[1;33m 2) Disable Internet(Disable global Cloudflare access)\\033[0m"
     else
-        echo " 2) Enable Internet Access"
+        echo -e "\\033[1;33m 2) Enable Internet (Enable global Cloudflare access)\\033[0m"
     fi
     
-    echo " 3) restart        (Restart all services)"
-    echo " 4) refresh status (Re-check server status)"
-    echo " 5) fix            (To fix issues)"
-    echo " 6) update         (Check and apply updates)"
-    echo " 7) uninstall      (Remove server stack)"
-    echo " 8) exit"
+    echo -e "\\033[1;33m 3) restart        (Restart all services)\\033[0m"
+    echo -e "\\033[1;33m 4) refresh status (Re-check server status)\\033[0m"
+    echo -e "\\033[1;33m 5) fix            (To fix issues)\\033[0m"
+    echo -e "\\033[1;33m 6) update         (Check and apply updates)\\033[0m"
+    echo -e "\\033[1;33m 7) uninstall      (Remove server stack)\\033[0m"
+    echo -e "\\033[1;33m 8) exit\\033[0m"
     echo ""
     read -p "Enter choice [1-8]: " choice
 
