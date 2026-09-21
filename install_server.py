@@ -11,11 +11,11 @@ import string
 from pathlib import Path
 
 # Current Version & Release Notes
-CURRENT_VERSION = "1.6.3"
+CURRENT_VERSION = "1.6.5"
 CHANGELOG = [
-    "Added Developer information section to the CLI status interface",
-    "Preserved ARM64 kernel warning bypass for Redis on Android",
-    "Maintained full English interactive interface and session re-exec logic"
+    "Reverted start action to automatically launch HTTPS (https://localhost:8443) in browser",
+    "Enhanced uninstall process to automatically remove exported shared SSL certificate (server.crt)",
+    "Maintained full English CLI interface and ARM64 Redis warning suppression"
 ]
 
 # System and Environment Paths
@@ -94,27 +94,24 @@ def setup_ssl():
         cert_path = SSL_DIR / "server.crt"
         key_path = SSL_DIR / "server.key"
 
-        if cert_path.exists() and key_path.exists():
-            return True
-
         openssl_cnf = SSL_DIR / "openssl.cnf"
         openssl_cnf.write_text("""\
 [req]
 distinguished_name = req_distinguished_name
 x509_extensions = v3_req
 prompt = no
-default_bits = 2048
 
 [req_distinguished_name]
-C = US
-ST = Dev
-L = Local
-O = TermuxServer
+C = YE
+ST = Sanaa
+L = Sanaa
+O = Termux Development Server
+OU = Local Dev
 CN = localhost
 
 [v3_req]
 basicConstraints = CA:FALSE
-keyUsage = digitalSignature, keyEncipherment
+keyUsage = nonRepudiation, digitalSignature, keyEncipherment
 subjectAltName = @alt_names
 
 [alt_names]
@@ -122,7 +119,12 @@ DNS.1 = localhost
 IP.1 = 127.0.0.1
 """)
         run_cmd(f"openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout '{key_path}' -out '{cert_path}' -config '{openssl_cnf}'")
-        print("\033[1;32m [✓] SSL Certificates generated. \033[0m")
+        
+        public_cert = HOME / "storage/shared/server.crt"
+        if (HOME / "storage/shared").exists():
+            shutil.copy(cert_path, public_cert)
+
+        print("\033[1;32m [✓] SSL Certificates generated (v3_req SAN enabled). \033[0m")
         return True
     except Exception as e:
         print(f"\033[1;31m [!] SSL generation error: {e}\033[0m")
@@ -338,7 +340,7 @@ show_banner_and_status() {{
 
     echo -e "\\033[1;33m═════════════════ [ DEVELOPER INFO ] ═════════════════\\033[0m"
     echo -e " 👤 Developer : \\033[1;37mElias Esmail\\033[0m"
-    echo -e " 📱 WhatsApp  : \\033[1;32mhttps://api.whatsapp.com/send?phone=967771902342\\033[0m"
+    echo -e " 📱 WhatsApp  : \\033[1;32m+967771902342\\033[0m"
     echo -e " 🔗 GitHub    : \\033[1;36mhttps://github.com/elias0esmail\\033[0m"
     echo -e "\\033[1;33m══════════════════════════════════════════════════════\\033[0m\\n"
     
@@ -503,8 +505,9 @@ uninstall_server() {{
             echo -e "\\033[1;33m[*] Stopping all services...\\033[0m"
             stop_services
 
-            echo -e "\\033[1;33m[*] Removing configuration files...\\033[0m"
+            echo -e "\\033[1;33m[*] Removing configuration files and certificates...\\033[0m"
             rm -rf "$PREFIX/etc/nginx/ssl"
+            rm -f "$HOME/storage/shared/server.crt"
             rm -f "$PREFIX/etc/nginx/nginx.conf"
             rm -f "$PREFIX/etc/php-fpm.d/www.conf"
             rm -f "$VERSION_FILE"
