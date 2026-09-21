@@ -11,11 +11,13 @@ import string
 from pathlib import Path
 
 # Current Version & Release Notes
-CURRENT_VERSION = "1.6.4"
+CURRENT_VERSION = "1.6.5"
 CHANGELOG = [
-    "Added Developer information section to the CLI status interface",
-    "Preserved ARM64 kernel warning bypass for Redis on Android",
-    "Maintained full English interactive interface and session re-exec logic"
+    "Added cloudflared installation for public tunnel support",
+    "Added Global URL field to server information panel",
+    "Added dynamic Internet Enable/Disable option in CLI menu",
+    "Auto-stop Cloudflare tunnel when stopping server or exiting CLI",
+    "Added internet-enable and internet-disable CLI commands"
 ]
 
 # System and Environment Paths
@@ -322,6 +324,38 @@ PREFIX="{PREFIX}"
 HTDOCS_DIR="{HTDOCS_DIR}"
 VERSION_FILE="{VERSION_FILE}"
 GITHUB_RAW_URL="{GITHUB_RAW_URL}"
+TUNNEL_PID_FILE="$PREFIX/tmp/cloudflared.pid"
+TUNNEL_URL_FILE="$PREFIX/tmp/cloudflared.url"
+TUNNEL_LOG="$PREFIX/tmp/cloudflared.log"
+
+is_tunnel_running() {{
+    if [ -f "$TUNNEL_PID_FILE" ]; then
+        TPID=$(cat "$TUNNEL_PID_FILE" 2>/dev/null)
+        if [ -n "$TPID" ] && kill -0 "$TPID" 2>/dev/null; then
+            return 0
+        fi
+    fi
+    if pgrep -f "cloudflared tunnel" > /dev/null; then
+        return 0
+    fi
+    return 1
+}}
+
+get_tunnel_url() {{
+    if [ -f "$TUNNEL_URL_FILE" ]; then
+        cat "$TUNNEL_URL_FILE" 2>/dev/null
+    fi
+}}
+
+has_internet() {{
+    if curl -s --max-time 5 -o /dev/null -w "%{{http_code}}" https://1.1.1.1 2>/dev/null | grep -qE '^[23]'; then
+        return 0
+    fi
+    if curl -s --max-time 5 -o /dev/null https://www.google.com 2>/dev/null; then
+        return 0
+    fi
+    return 1
+}}
 
 show_banner_and_status() {{
     clear
@@ -336,26 +370,47 @@ show_banner_and_status() {{
     echo "         |___/        Server Manager v{CURRENT_VERSION}  "
     echo -e "\\033[0m"
 
-    echo -e "\\033[1;33m═════════════════ [ DEVELOPER INFO ] ═════════════════\\033[0m"
-    echo -e " 👤 Developer : \\033[1;37mElias Esmail\\033[0m"
-    echo -e " 📱 WhatsApp  : \\033[1;32mhttps://api.whatsapp.com/send?phone=967771902342\\033[0m"
-    echo -e " 🔗 GitHub    : \\033[1;36mhttps://github.com/elias0esmail\\033[0m"
-    echo -e "\\033[1;33m══════════════════════════════════════════════════════\\033[0m\\n"
-    
-    echo -e "\\033[1;35m═════════════════ [ SERVICES STATUS ] ═════════════════\\033[0m"
+    echo -e "\\033[1;33m============= [ DEVELOPER INFO ] ==============\\033[0m"
+    echo -e " Developer : \\033[1;37mElias Esmail\\033[0m"
+    echo -e " WhatsApp  : \\033[1;32mhttps://api.whatsapp.com/send?phone=967771902342\\033[0m"
+    echo -e " GitHub    : \\033[1;36mhttps://github.com/elias0esmail\\033[0m"
+    echo -e "\\033[1;33m================================================\\033[0m\\n"
+
+    echo -e "\\033[1;35m============= [ SERVICES STATUS ] =============\\033[0m"
     pgrep -f nginx > /dev/null && echo -e " Nginx:    \\033[1;32mRunning [OK]\\033[0m" || echo -e " Nginx:    \\033[1;31mStopped [X]\\033[0m"
     pgrep -f php-fpm > /dev/null && echo -e " PHP-FPM:  \\033[1;32mRunning [OK]\\033[0m" || echo -e " PHP-FPM:  \\033[1;31mStopped [X]\\033[0m"
     pgrep -f "mariadb|mysqld" > /dev/null && echo -e " MariaDB:  \\033[1;32mRunning [OK]\\033[0m" || echo -e " MariaDB:  \\033[1;31mStopped [X]\\033[0m"
     pgrep -f redis-server > /dev/null && echo -e " Redis:    \\033[1;32mRunning [OK]\\033[0m" || echo -e " Redis:    \\033[1;31mStopped [X]\\033[0m"
-    echo -e "\\033[1;35m═══════════════════════════════════════════════════════\\033[0m\\n"
+    if is_tunnel_running; then
+        echo -e " Tunnel:   \\033[1;32mRunning [OK]\\033[0m"
+    else
+        echo -e " Tunnel:   \\033[1;31mStopped [X]\\033[0m"
+    fi
+    echo -e "\\033[1;35m===============================================\\033[0m\\n"
 
+    SVC_INFO=0
     if pgrep -f nginx > /dev/null || pgrep -f php-fpm > /dev/null || pgrep -f "mariadb|mysqld" > /dev/null || pgrep -f redis-server > /dev/null; then
-        echo -e "\\033[1;36m═════════════════ [ SERVER INFORMATION ] ═════════════════\\033[0m"
+        SVC_INFO=1
+    fi
+
+    TUNNEL_URL_VAL=$(get_tunnel_url)
+    TUNNEL_ACTIVE=0
+    if is_tunnel_running && [ -n "$TUNNEL_URL_VAL" ]; then
+        TUNNEL_ACTIVE=1
+    fi
+
+    if [ "$SVC_INFO" -eq 1 ] || [ "$TUNNEL_ACTIVE" -eq 1 ]; then
+        echo -e "\\033[1;36m============= [ SERVER INFORMATION ] =============\\033[0m"
         echo -e " Web Root Path : \\033[1;33m$HTDOCS_DIR\\033[0m"
         echo -e " HTTP URL      : \\033[1;34mhttp://localhost:8080\\033[0m"
         echo -e " HTTPS URL     : \\033[1;32mhttps://localhost:8443\\033[0m"
         echo -e " phpMyAdmin    : \\033[1;35mhttp://localhost:8080/phpmyadmin\\033[0m"
-        echo -e "\\033[1;36m══════════════════════════════════════════════════════════\\033[0m\\n"
+        if [ "$TUNNEL_ACTIVE" -eq 1 ]; then
+            echo -e " Global URL    : \\033[1;32m$TUNNEL_URL_VAL\\033[0m"
+        else
+            echo -e " Global URL    : \\033[1;31mInactive\\033[0m"
+        fi
+        echo -e "\\033[1;36m==================================================\\033[0m\\n"
     fi
 }}
 
@@ -411,6 +466,10 @@ start_services() {{
 }}
 
 stop_services() {{
+    if is_tunnel_running; then
+        echo -e "\\033[1;33m[*] Stopping internet tunnel...\\033[0m"
+        disable_internet
+    fi
     echo -e "\\033[1;33m[*] Stopping all services...\\033[0m"
     pkill -f nginx > /dev/null 2>&1
     pkill -f php-fpm > /dev/null 2>&1
@@ -427,6 +486,74 @@ restart_services() {{
     start_services
 }}
 
+enable_internet() {{
+    if ! pgrep -f nginx > /dev/null && ! pgrep -f php-fpm > /dev/null && ! pgrep -f "mariadb|mysqld" > /dev/null && ! pgrep -f redis-server > /dev/null; then
+        echo -e "\\033[1;31m[!] Server is not running. Please start the server first.\\033[0m"
+        sleep 2
+        return
+    fi
+
+    if is_tunnel_running; then
+        echo -e "\\033[1;33m[i] Internet tunnel is already running.\\033[0m"
+        sleep 1.5
+        return
+    fi
+
+    if ! has_internet; then
+        echo -e "\\033[1;31m[!] No internet connection. Please connect to the internet and try again.\\033[0m"
+        sleep 2
+        return
+    fi
+
+    echo -e "\\033[1;34m[*] Starting Cloudflare tunnel...\\033[0m"
+    rm -f "$TUNNEL_PID_FILE" "$TUNNEL_URL_FILE" "$TUNNEL_LOG"
+    cloudflared tunnel --url http://localhost:8080 > "$TUNNEL_LOG" 2>&1 &
+    echo $! > "$TUNNEL_PID_FILE"
+
+    echo -e "\\033[1;33m[*] Waiting for the public URL...\\033[0m"
+    FOUND_URL=""
+    i=0
+    while [ $i -lt 30 ]; do
+        sleep 1
+        i=$((i+1))
+        FOUND_URL=$(grep -oE 'https://[a-zA-Z0-9-]+\\.trycloudflare\\.com' "$TUNNEL_LOG" 2>/dev/null | head -n 1)
+        if [ -n "$FOUND_URL" ]; then
+            break
+        fi
+    done
+
+    if [ -n "$FOUND_URL" ]; then
+        echo "$FOUND_URL" > "$TUNNEL_URL_FILE"
+        echo -e "\\033[1;32m[OK] Global URL: $FOUND_URL\\033[0m"
+    else
+        echo -e "\\033[1;31m[!] Failed to obtain the tunnel URL. Stopping tunnel.\\033[0m"
+        disable_internet
+    fi
+    sleep 2
+}}
+
+disable_internet() {{
+    if ! is_tunnel_running; then
+        echo -e "\\033[1;33m[i] Internet tunnel is already disabled.\\033[0m"
+        sleep 1
+        return
+    fi
+
+    echo -e "\\033[1;33m[*] Stopping Cloudflare tunnel...\\033[0m"
+    if [ -f "$TUNNEL_PID_FILE" ]; then
+        TPID=$(cat "$TUNNEL_PID_FILE" 2>/dev/null)
+        if [ -n "$TPID" ]; then
+            kill "$TPID" 2>/dev/null
+            sleep 1
+            kill -9 "$TPID" 2>/dev/null
+        fi
+    fi
+    pkill -f "cloudflared tunnel" > /dev/null 2>&1
+    rm -f "$TUNNEL_PID_FILE" "$TUNNEL_URL_FILE" "$TUNNEL_LOG"
+    echo -e "\\033[1;31m[OK] Internet tunnel disabled.\\033[0m"
+    sleep 1
+}}
+
 update_server() {{
     MODE="$1"
 
@@ -440,7 +567,6 @@ update_server() {{
     TMP_UPD="$PREFIX/tmp/install_server_latest.py"
     curl -sL --max-time 15 "$GITHUB_RAW_URL/install_server.py" -o "$TMP_UPD" 2>/dev/null
     
-    # No internet / download failed / empty file
     if [ ! -s "$TMP_UPD" ]; then
         rm -f "$TMP_UPD"
         if [ "$MODE" = "auto" ]; then
@@ -526,6 +652,7 @@ uninstall_server() {{
             rm -f "$PREFIX/etc/nginx/nginx.conf"
             rm -f "$PREFIX/etc/php-fpm.d/www.conf"
             rm -f "$VERSION_FILE"
+            rm -f "$TUNNEL_PID_FILE" "$TUNNEL_URL_FILE" "$TUNNEL_LOG"
             
             read -p "Do you also want to delete the web root ($HTDOCS_DIR)? (y/N): " del_web
             case "$del_web" in
@@ -556,8 +683,10 @@ if [ -n "$1" ]; then
         restart) restart_services ;;
         status) show_banner_and_status; read -p "Press Enter to continue..." ;;
         update) update_server manual ;;
+        internet-enable|enable-internet) enable_internet ;;
+        internet-disable|disable-internet) disable_internet ;;
         delete|uninstall) uninstall_server ;;
-        *) echo "Usage: myserver [start|stop|restart|status|update|uninstall]" ;;
+        *) echo "Usage: myserver [start|stop|restart|status|update|internet-enable|internet-disable|uninstall]" ;;
     esac
     exit 0
 fi
@@ -571,7 +700,6 @@ update_server auto
 while true; do
     show_banner_and_status
 
-    # Detect current server state
     if pgrep -f nginx > /dev/null || pgrep -f php-fpm > /dev/null || pgrep -f "mariadb|mysqld" > /dev/null || pgrep -f redis-server > /dev/null; then
         SERVER_RUNNING=1
     else
@@ -584,13 +712,18 @@ while true; do
     else
         echo " 1) start          (Start all services)"
     fi
-    echo " 2) restart        (Restart all services)"
-    echo " 3) refresh status (Re-check server status)"
-    echo " 4) update         (Check and apply updates)"
-    echo " 5) uninstall      (Remove server stack)"
-    echo " 6) exit           (Exit & Stop Server)"
+    if is_tunnel_running; then
+        echo " 2) Disable Internet (disable internet access)"
+    else
+        echo " 2) Enable Internet  (enable internet access)"
+    fi
+    echo " 3) restart        (Restart all services)"
+    echo " 4) refresh status (Re-check server status)"
+    echo " 5) update         (Check and apply updates)"
+    echo " 6) uninstall      (Remove server stack)"
+    echo " 7) exit           (Exit & Stop Server)"
     echo ""
-    read -p "Enter choice [1-6]: " choice
+    read -p "Enter choice [1-7]: " choice
 
     case "$choice" in
         1)
@@ -602,11 +735,18 @@ while true; do
             ;;
         start) start_services ;;
         stop) stop_services ;;
-        2|restart) restart_services ;;
-        3|refresh) continue ;;
-        4|update) update_server manual ;;
-        5|uninstall|delete) uninstall_server ;;
-        6|exit)
+        2)
+            if is_tunnel_running; then
+                disable_internet
+            else
+                enable_internet
+            fi
+            ;;
+        3|restart) restart_services ;;
+        4|refresh) continue ;;
+        5|update) update_server manual ;;
+        6|uninstall|delete) uninstall_server ;;
+        7|exit)
             stop_services
             echo -e "\\033[1;32mServer stopped and exited successfully.\\033[0m"
             exit 0
@@ -643,7 +783,7 @@ def main():
         steps = [
             ("Updating Packages", "pkg update -y && pkg upgrade -y"),
             ("Storage Setup", None),
-            ("Installing Core Software", "pkg install -y nginx php php-fpm mariadb redis openssl-tool curl tar git wget"),
+            ("Installing Core Software", "pkg install -y nginx php php-fpm mariadb redis openssl-tool curl tar git wget cloudflared || pkg install -y nginx php php-fpm mariadb redis openssl-tool curl tar git wget"),
             ("MariaDB Initialization", setup_mariadb),
             ("Redis Setup", setup_redis),
             ("PHP-FPM Configuration", setup_php_fpm),
