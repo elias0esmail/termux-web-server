@@ -11,11 +11,11 @@ import string
 from pathlib import Path
 
 # Current Version & Release Notes
-CURRENT_VERSION = "1.7.0"
+CURRENT_VERSION = "1.8.0"
 CHANGELOG = [
-    "Added Option 5 (fix) to repair server stack and update phpMyAdmin without touching web root",
-    "Expanded main CLI menu to 8 numbered options",
-    "Maintained automatic HTTPS launch, ARM64 Redis fix, and CA certificate cleanup on uninstall"
+    "Refactored Option 5 (fix) to wipe all configs, version info, and binaries except htdocs, then update packages and reinstall completely",
+    "Enhanced update & cleanup workflows for complete server state resets",
+    "Maintained automatic HTTPS launch, ARM64 Redis fix, and full 8-option CLI menu"
 ]
 
 # System and Environment Paths
@@ -323,6 +323,7 @@ def create_myserver_cli():
     script_content = f"""#!/data/data/com.termux/files/usr/bin/bash
 
 PREFIX="{PREFIX}"
+HOME_DIR="{HOME}"
 HTDOCS_DIR="{HTDOCS_DIR}"
 VERSION_FILE="{VERSION_FILE}"
 GITHUB_RAW_URL="{GITHUB_RAW_URL}"
@@ -433,30 +434,40 @@ restart_services() {{
 }}
 
 fix_server() {{
-    echo -e "\\033[1;33m[*] Initiating server repair stack without deleting web root...\\033[0m"
+    echo -e "\\033[1;33m[*] Starting complete server stack wipe and fresh re-installation...\\033[0m"
     stop_services
-    
-    echo -e "\\033[1;33m[*] Removing old configurations, SSL certs, and temporaries...\\033[0m"
-    rm -rf "$PREFIX/etc/nginx/ssl"
-    rm -f "$HOME/storage/shared/server.crt"
-    rm -f "$PREFIX/etc/nginx/nginx.conf"
-    rm -f "$PREFIX/etc/php-fpm.d/www.conf"
-    
+
+    echo -e "\\033[1;33m[*] Deleting all configurations, binaries, databases and version files (except $HTDOCS_DIR)...\\033[0m"
+    rm -rf "$PREFIX/etc/nginx"
+    rm -rf "$PREFIX/etc/php-fpm.d"
+    rm -f "$PREFIX/etc/php/php.ini"
+    rm -f "$PREFIX/etc/redis.conf"
+    rm -rf "$PREFIX/var/lib/mysql"
+    rm -rf "$PREFIX/var/lib/redis"
+    rm -rf "$PREFIX/var/log"
+    rm -rf "$PREFIX/tmp"
+    rm -f "$HOME_DIR/storage/shared/server.crt"
+    rm -f "$VERSION_FILE"
+    rm -f "$PREFIX/bin/myserver"
+
     mkdir -p "$PREFIX/tmp"
-    TMP_FIX="$PREFIX/tmp/install_server_fix.py"
-    curl -sL "$GITHUB_RAW_URL/install_server.py" -o "$TMP_FIX"
-    
-    if [ -s "$TMP_FIX" ]; then
-        echo -e "\\033[1;34m[*] Re-running setup and updating phpMyAdmin...\\033[0m"
-        python3 "$TMP_FIX"
-        rm -f "$TMP_FIX"
+    TMP_INSTALL="$PREFIX/tmp/install_server_fresh.py"
+
+    echo -e "\\033[1;36m[*] Fetching fresh installation script from repository...\\033[0m"
+    curl -sL "$GITHUB_RAW_URL/install_server.py" -o "$TMP_INSTALL"
+
+    if [ -s "$TMP_INSTALL" ]; then
+        echo -e "\\033[1;34m[*] Executing fresh setup & phpMyAdmin update...\\033[0m"
+        python3 "$TMP_INSTALL"
+        rm -f "$TMP_INSTALL"
+        echo -e "\\n\\033[1;32m[✓] Server repaired and reinstalled completely! Your web root ($HTDOCS_DIR) remains safe.\\033[0m"
+        echo -e "\\033[1;36m[*] Launching updated myserver binary...\\033[0m"
+        read -p "Press Enter to continue..."
+        exec "$PREFIX/bin/myserver"
     else
-        echo -e "\\033[1;34m[*] Local repair executing...\\033[0m"
-        python3 -c "import install_server; install_server.main()" 2>/dev/null || true
+        echo -e "\\033[1;31m[!] Failed to download fresh installation script. Check your internet connection.\\033[0m"
+        read -p "Press Enter to continue..."
     fi
-    
-    echo -e "\\n\\033[1;32m[✓] Server repaired successfully while preserving $HTDOCS_DIR!\\033[0m"
-    read -p "Press Enter to continue..."
 }}
 
 update_server() {{
@@ -535,10 +546,14 @@ uninstall_server() {{
             stop_services
 
             echo -e "\\033[1;33m[*] Removing configuration files and certificates...\\033[0m"
-            rm -rf "$PREFIX/etc/nginx/ssl"
-            rm -f "$HOME/storage/shared/server.crt"
-            rm -f "$PREFIX/etc/nginx/nginx.conf"
-            rm -f "$PREFIX/etc/php-fpm.d/www.conf"
+            rm -rf "$PREFIX/etc/nginx"
+            rm -rf "$PREFIX/etc/php-fpm.d"
+            rm -f "$PREFIX/etc/php/php.ini"
+            rm -f "$PREFIX/etc/redis.conf"
+            rm -rf "$PREFIX/var/lib/mysql"
+            rm -rf "$PREFIX/var/lib/redis"
+            rm -rf "$PREFIX/var/log"
+            rm -f "$HOME_DIR/storage/shared/server.crt"
             rm -f "$VERSION_FILE"
             
             read -p "Do you also want to delete the web root ($HTDOCS_DIR)? (y/N): " del_web
@@ -584,7 +599,7 @@ while true; do
     echo " 2) stop           (Stop all services)"
     echo " 3) restart        (Restart all services)"
     echo " 4) refresh status (Re-check server status)"
-    echo " 5) fix            (Re-install server to To fix issues)"
+    echo " 5) fix            (Clean wipe & fresh install without deleting htdocs)"
     echo " 6) update         (Check and apply updates)"
     echo " 7) uninstall      (Remove server stack)"
     echo " 8) exit           (Exit & Stop Server)"
