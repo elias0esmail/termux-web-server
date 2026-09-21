@@ -74,9 +74,16 @@ pkg update -y && pkg upgrade -y
   ```bash
   python install_server.py
   ```
+  ```bash
+  cd
+  ```
+  ```bash
+  myserver
+  ```
+  
 **Or install using a single command:**
   ```bash
-  pkg update -y && pkg install -y git python && git clone https://github.com/elias0esmail/termux-web-server.git && cd termux-web-server && python3 install_server.py
+  pkg update -y && pkg install -y git python && git clone https://github.com/elias0esmail/termux-web-server.git && cd termux-web-server && python3 install_server.py && cd
   ```
 
 <br/>

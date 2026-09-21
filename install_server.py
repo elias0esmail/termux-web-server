@@ -11,12 +11,12 @@ import string
 from pathlib import Path
 
 # Current Version & Release Notes
-CURRENT_VERSION = "2.0.1"
+CURRENT_VERSION = "2.0.2"
 CHANGELOG = [
-    "Fixed CLI template formatting error (IndexError) during installation",
-    "Fixed service graceful termination to prevent process startup failures",
-    "Maintained Cloudflare Tunnel Global URL & Dynamic Status integration",
-    "Maintained Python 3.12+ raw string escape sequence fixes"
+    "Restored stable service startup commands from v1.6.3",
+    "Fixed update checker regex matching to prevent false update prompts",
+    "Fixed CURRENT_VERSION variable evaluation in Bash CLI script",
+    "Maintained Cloudflare Tunnel and PHP 8.x/Python 3.12+ compatibility"
 ]
 
 # System and Environment Paths
@@ -380,9 +380,17 @@ check_auto_update() {{
         curl -sL --connect-timeout 3 "$GITHUB_RAW_URL/install_server.py" -o "$TMP_AUTO_UPD"
         
         if [ -s "$TMP_AUTO_UPD" ]; then
-            REMOTE_VER=$(grep -oP 'CURRENT_VERSION\\s*=\\s*"\\K[^"]+' "$TMP_AUTO_UPD" 2>/dev/null || echo "$LOCAL_VER")
+            REMOTE_VER=$(python3 -c '
+import re
+try:
+    with open("'"$TMP_AUTO_UPD"'", "r", encoding="utf-8") as f:
+        m = re.search(r"CURRENT_VERSION\\s*=\\s*\"([^\"]+)\"", f.read())
+        print(m.group(1) if m else "'"$LOCAL_VER"'")
+except Exception:
+    print("'"$LOCAL_VER"'")
+')
             
-            if [ "$LOCAL_VER" != "$REMOTE_VER" ] && [ "$REMOTE_VER" != "0.0.0" ]; then
+            if [ "$LOCAL_VER" != "$REMOTE_VER" ] && [ -n "$REMOTE_VER" ]; then
                 echo -e "\\n\\033[1;35m══════════════════════════════════════════════════════\\033[0m"
                 echo -e "\\033[1;33m 🚀 NEW UPDATE AVAILABLE: Version $REMOTE_VER (Current: $LOCAL_VER)\\033[0m"
                 echo -e "\\033[1;35m══════════════════════════════════════════════════════\\033[0m"
@@ -481,22 +489,13 @@ start_services() {{
         if [ ! -d "$PREFIX/var/lib/mysql/mysql" ]; then
             mariadb-install-db --datadir="$PREFIX/var/lib/mysql" > /dev/null 2>&1
         fi
-        if command -v mariadbd-safe &> /dev/null; then
-            mariadbd-safe --datadir="$PREFIX/var/lib/mysql" > /dev/null 2>&1 &
-        elif command -v mysqld_safe &> /dev/null; then
-            mysqld_safe --datadir="$PREFIX/var/lib/mysql" > /dev/null 2>&1 &
-        else
-            mariadbd --datadir="$PREFIX/var/lib/mysql" > /dev/null 2>&1 &
-        fi
+        mysqld_safe --datadir="$PREFIX/var/lib/mysql" > /dev/null 2>&1 &
     fi
 
     echo -e "\\033[1;34m[+] Starting Redis...\\033[0m"
     mkdir -p "$PREFIX/var/lib/redis" "$PREFIX/var/log"
     if ! pgrep -f redis-server > /dev/null; then
         if [ -f "$PREFIX/etc/redis.conf" ]; then
-            if ! grep -q "ignore-warnings ARM64-COW-BUG" "$PREFIX/etc/redis.conf"; then
-                echo "ignore-warnings ARM64-COW-BUG" >> "$PREFIX/etc/redis.conf"
-            fi
             redis-server "$PREFIX/etc/redis.conf" > /dev/null 2>&1
         else
             redis-server --daemonize yes --ignore-warnings ARM64-COW-BUG > /dev/null 2>&1
@@ -536,13 +535,6 @@ stop_services() {{
     pkill -f mysqld > /dev/null 2>&1
     pkill -f mariadb > /dev/null 2>&1
     sleep 1
-    
-    # Graceful cleanup for stubborn processes
-    pkill -9 -f nginx > /dev/null 2>&1
-    pkill -9 -f php-fpm > /dev/null 2>&1
-    pkill -9 -f redis-server > /dev/null 2>&1
-    pkill -9 -f mariadbd > /dev/null 2>&1
-    pkill -9 -f mysqld > /dev/null 2>&1
     
     echo -e "\\033[1;31m[✓] All services stopped.\\033[0m"
     sleep 1
@@ -666,7 +658,15 @@ update_server() {{
         return
     fi
     
-    REMOTE_VER=$(grep -oP 'CURRENT_VERSION\\s*=\\s*"\\K[^"]+' "$TMP_UPD" 2>/dev/null || echo "0.0.0")
+    REMOTE_VER=$(python3 -c '
+import re
+try:
+    with open("'"$TMP_UPD"'", "r", encoding="utf-8") as f:
+        m = re.search(r"CURRENT_VERSION\\s*=\\s*\"([^\"]+)\"", f.read())
+        print(m.group(1) if m else "'"$LOCAL_VER"'")
+except Exception:
+    print("'"$LOCAL_VER"'")
+')
     
     echo -e "  - Installed Version : \\033[1;33m$LOCAL_VER\\033[0m"
     echo -e "  - Remote Version    : \\033[1;32m$REMOTE_VER\\033[0m"
