@@ -11,11 +11,11 @@ import string
 from pathlib import Path
 
 # Current Version & Release Notes
-CURRENT_VERSION = "2.0.4"
+CURRENT_VERSION = "1.6.3"
 CHANGELOG = [
-    "Fixed python3 -c inline script syntax error when parsing CURRENT_VERSION",
-    "Escaped internal quotes in Bash check_auto_update and update_server functions",
-    "Resolved empty Remote Version display bug during update check"
+    "Added Developer information section to the CLI status interface",
+    "Preserved ARM64 kernel warning bypass for Redis on Android",
+    "Maintained full English interactive interface and session re-exec logic"
 ]
 
 # System and Environment Paths
@@ -27,8 +27,6 @@ PHP_FPM_DIR = PREFIX / "etc/php-fpm.d"
 SSL_DIR = NGINX_DIR / "ssl"
 TMP_DIR = PREFIX / "tmp"
 VERSION_FILE = PREFIX / "etc/myserver_version"
-TUNNEL_LOG = TMP_DIR / "cloudflared.log"
-TUNNEL_URL_FILE = TMP_DIR / "cloudflared_url.txt"
 REPO_DIR = Path(__file__).resolve().parent
 
 GITHUB_RAW_URL = "https://raw.githubusercontent.com/elias0esmail/termux-web-server/main"
@@ -96,24 +94,27 @@ def setup_ssl():
         cert_path = SSL_DIR / "server.crt"
         key_path = SSL_DIR / "server.key"
 
+        if cert_path.exists() and key_path.exists():
+            return True
+
         openssl_cnf = SSL_DIR / "openssl.cnf"
         openssl_cnf.write_text("""\
 [req]
 distinguished_name = req_distinguished_name
 x509_extensions = v3_req
 prompt = no
+default_bits = 2048
 
 [req_distinguished_name]
-C = YE
-ST = Sanaa
-L = Sanaa
-O = Termux Development Server
-OU = Local Dev
+C = US
+ST = Dev
+L = Local
+O = TermuxServer
 CN = localhost
 
 [v3_req]
 basicConstraints = CA:FALSE
-keyUsage = nonRepudiation, digitalSignature, keyEncipherment
+keyUsage = digitalSignature, keyEncipherment
 subjectAltName = @alt_names
 
 [alt_names]
@@ -121,12 +122,7 @@ DNS.1 = localhost
 IP.1 = 127.0.0.1
 """)
         run_cmd(f"openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout '{key_path}' -out '{cert_path}' -config '{openssl_cnf}'")
-        
-        public_cert = HOME / "storage/shared/server.crt"
-        if (HOME / "storage/shared").exists():
-            shutil.copy(cert_path, public_cert)
-
-        print("\033[1;32m [✓] SSL Certificates generated (v3_req SAN enabled). \033[0m")
+        print("\033[1;32m [✓] SSL Certificates generated. \033[0m")
         return True
     except Exception as e:
         print(f"\033[1;31m [!] SSL generation error: {e}\033[0m")
@@ -137,15 +133,9 @@ def setup_nginx():
         conf_path = NGINX_DIR / "nginx.conf"
         cert_path = SSL_DIR / "server.crt"
         key_path = SSL_DIR / "server.key"
-        
-        (PREFIX / "var/log/nginx").mkdir(parents=True, exist_ok=True)
-        (PREFIX / "var/run").mkdir(parents=True, exist_ok=True)
 
         nginx_config = f"""\
 worker_processes 2;
-pid {PREFIX}/var/run/nginx.pid;
-error_log {PREFIX}/var/log/nginx/error.log info;
-
 events {{ worker_connections 1024; }}
 
 http {{
@@ -154,7 +144,6 @@ http {{
     sendfile on;
     keepalive_timeout 65;
     gzip on;
-    access_log {PREFIX}/var/log/nginx/access.log;
 
     # HTTP Server (Port 8080)
     server {{
@@ -165,7 +154,7 @@ http {{
         index index.php index.html;
 
         location / {{
-            try_files $uri $uri/ /index.php?$args;
+            try_files $uri $uri/ /index.php?$query_string;
         }}
 
         location ~ \\.php$ {{
@@ -173,10 +162,6 @@ http {{
             fastcgi_index index.php;
             include fastcgi_params;
             fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
-        }}
-
-        location ~ /\\.ht {{
-            deny all;
         }}
     }}
 
@@ -195,7 +180,7 @@ http {{
         index index.php index.html;
 
         location / {{
-            try_files $uri $uri/ /index.php?$args;
+            try_files $uri $uri/ /index.php?$query_string;
         }}
 
         location ~ \\.php$ {{
@@ -203,10 +188,6 @@ http {{
             fastcgi_index index.php;
             include fastcgi_params;
             fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
-        }}
-
-        location ~ /\\.ht {{
-            deny all;
         }}
     }}
 }}
@@ -263,24 +244,8 @@ extension=gd
 def setup_htdocs():
     try:
         HTDOCS_DIR.mkdir(parents=True, exist_ok=True)
-        index_file = HTDOCS_DIR / "index.php"
-        if not index_file.exists():
-            index_file.write_text("<?php echo '<h1>Nginx + PHP-FPM Server is Running!</h1>'; ?>")
+        (HTDOCS_DIR / "index.php").write_text("<?php echo '<h1>Nginx + PHP-FPM Server is Running!</h1>'; ?>")
         
-        htaccess_file = HTDOCS_DIR / ".htaccess"
-        if not htaccess_file.exists():
-            htaccess_content = """# Default Apache / Nginx Fallback .htaccess Configuration
-<IfModule mod_rewrite.c>
-    RewriteEngine On
-    RewriteBase /
-    RewriteCond %{REQUEST_FILENAME} !-f
-    RewriteCond %{REQUEST_FILENAME} !-d
-    RewriteRule ^ index.php [L]
-</IfModule>
-"""
-            htaccess_file.write_text(htaccess_content)
-            print("\033[1;32m [✓] Default .htaccess file created in root htdocs. \033[0m")
-
         info_dir = HTDOCS_DIR / "phpinfo"
         info_dir.mkdir(exist_ok=True)
         (info_dir / "index.php").write_text("<?php phpinfo(); ?>")
@@ -354,147 +319,70 @@ def create_myserver_cli():
     script_content = f"""#!/data/data/com.termux/files/usr/bin/bash
 
 PREFIX="{PREFIX}"
-HOME_DIR="{HOME}"
 HTDOCS_DIR="{HTDOCS_DIR}"
 VERSION_FILE="{VERSION_FILE}"
 GITHUB_RAW_URL="{GITHUB_RAW_URL}"
-CURRENT_VERSION="{CURRENT_VERSION}"
-TUNNEL_LOG="$PREFIX/tmp/cloudflared.log"
-TUNNEL_URL_FILE="$PREFIX/tmp/cloudflared_url.txt"
-
-check_server_running() {{
-    if pgrep -f "nginx" > /dev/null || pgrep -f "php-fpm" > /dev/null || pgrep -f "mariadbd|mysqld" > /dev/null || pgrep -f "redis-server" > /dev/null; then
-        return 0
-    else
-        return 1
-    fi
-}}
-
-check_auto_update() {{
-    if ping -c 1 -W 2 8.8.8.8 > /dev/null 2>&1 || curl -s --connect-timeout 2 https://www.google.com > /dev/null 2>&1; then
-        LOCAL_VER=$(cat "$VERSION_FILE" 2>/dev/null || echo "$CURRENT_VERSION")
-        TMP_AUTO_UPD="$PREFIX/tmp/install_server_auto_check.py"
-        mkdir -p "$PREFIX/tmp"
-        
-        curl -sL --connect-timeout 3 "$GITHUB_RAW_URL/install_server.py" -o "$TMP_AUTO_UPD"
-        
-        if [ -s "$TMP_AUTO_UPD" ]; then
-            REMOTE_VER=$(python3 -c '
-import re
-try:
-    with open("'"$TMP_AUTO_UPD"'", "r", encoding="utf-8") as f:
-        m = re.search(r"CURRENT_VERSION\s*=\s*[\"'\']([^\"'\']+)[\"'\']", f.read())
-        print(m.group(1) if m else "'"$LOCAL_VER"'")
-except Exception:
-    print("'"$LOCAL_VER"'")
-')
-            
-            if [ "$LOCAL_VER" != "$REMOTE_VER" ] && [ -n "$REMOTE_VER" ]; then
-                echo -e "\\n\\033[1;35m══════════════════════════════════════════════════════\\033[0m"
-                echo -e "\\033[1;33m 🚀 NEW UPDATE AVAILABLE: Version $REMOTE_VER (Current: $LOCAL_VER)\\033[0m"
-                echo -e "\\033[1;35m══════════════════════════════════════════════════════\\033[0m"
-                echo -e "\\033[1;36m📋 Release Details & What's New:\\033[0m"
-                python3 -c '
-import ast, re
-try:
-    with open("'"$TMP_AUTO_UPD"'", "r", encoding="utf-8") as f:
-        content = f.read()
-    match = re.search(r"CHANGELOG\s*=\s*(\\[.*?\\])", content, re.DOTALL)
-    if match:
-        log_list = ast.literal_eval(match.group(1))
-        for item in log_list:
-            print("  • " + str(item))
-    else:
-        print("  • General fixes, stability improvements, and updates.")
-except Exception:
-    print("  • General fixes, stability improvements, and updates.")
-'
-                echo ""
-                read -p "Would you like to install this update now? (y/N): " confirm_update
-                case "$confirm_update" in
-                    [yY][eE][sS]|[yY])
-                        echo -e "\\033[1;33m[*] Stopping running services before update...\\033[0m"
-                        stop_services
-                        echo -e "\\033[1;34m[*] Installing update...\\033[0m"
-                        python3 "$TMP_AUTO_UPD"
-                        rm -f "$TMP_AUTO_UPD"
-                        echo -e "\\n\\033[1;32m[✓] Updated to version $REMOTE_VER successfully!\\033[0m"
-                        echo -e "\\033[1;36m[*] Press Enter to launch updated myserver manager...\\033[0m"
-                        read -r
-                        exec "$PREFIX/bin/myserver"
-                        ;;
-                    *)
-                        echo -e "\\033[1;33m[i] Update postponed. Starting server manager...\\033[0m\\n"
-                        rm -f "$TMP_AUTO_UPD"
-                        sleep 1
-                        ;;
-                esac
-            else
-                rm -f "$TMP_AUTO_UPD"
-            fi
-        else
-            rm -f "$TMP_AUTO_UPD"
-        fi
-    fi
-}}
 
 show_banner_and_status() {{
     clear
     echo -e "\\033[1;36m"
     echo "  __  __       _____                                "
-    echo " |  \\\\/  |     / ____|                               "
-    echo " | \\\\  / |0_ _| (___   ___  _ __ __   _____ _ __ "
-    echo " | |\\\\/| | | | |\\\\___ \\\\ / _ \\\\| '__|\\\\ \\\\ / / _ \\\\ '__|"
-    echo " | |  | | |_| |____) |  __/| |    \\\\ V /  __/ |   "
-    echo " |_|  |_|\\\\__, |_____/ \\\\___||_|     \\\\_/ \\\\___|_|   "
+    echo " |  \\/  |     / ____|                               "
+    echo " | \\  / |0_ _| (___   ___  _ __ __   _____ _ __ "
+    echo " | |\\/| | | | |\\___ \\ / _ \\| '__|\\ \\ / / _ \\ '__|"
+    echo " | |  | | |_| |____) |  __/| |    \\ V /  __/ |   "
+    echo " |_|  |_|\\__, |_____/ \\___||_|     \\_/ \\___|_|   "
     echo "          __/ |                                  "
-    echo "         |___/        Server Manager v$CURRENT_VERSION  "
+    echo "         |___/        Server Manager v{CURRENT_VERSION}  "
     echo -e "\\033[0m"
 
     echo -e "\\033[1;33m═════════════════ [ DEVELOPER INFO ] ═════════════════\\033[0m"
     echo -e " 👤 Developer : \\033[1;37mElias Esmail\\033[0m"
-    echo -e " 📱 WhatsApp  : \\033[1;32m+967771902342\\033[0m"
+    echo -e " 📱 WhatsApp  : \\033[1;32mhttps://api.whatsapp.com/send?phone=967771902342\\033[0m"
     echo -e " 🔗 GitHub    : \\033[1;36mhttps://github.com/elias0esmail\\033[0m"
     echo -e "\\033[1;33m══════════════════════════════════════════════════════\\033[0m\\n"
     
     echo -e "\\033[1;35m═════════════════ [ SERVICES STATUS ] ═════════════════\\033[0m"
-    pgrep -f "nginx" > /dev/null && echo -e " Nginx:    \\033[1;32mRunning [✓]\\033[0m" || echo -e " Nginx:    \\033[1;31mStopped [✗]\\033[0m"
-    pgrep -f "php-fpm" > /dev/null && echo -e " PHP-FPM:  \\033[1;32mRunning [✓]\\033[0m" || echo -e " PHP-FPM:  \\033[1;31mStopped [✗]\\033[0m"
-    pgrep -f "mariadbd|mysqld" > /dev/null && echo -e " MariaDB:  \\033[1;32mRunning [✓]\\033[0m" || echo -e " MariaDB:  \\033[1;31mStopped [✗]\\033[0m"
-    pgrep -f "redis-server" > /dev/null && echo -e " Redis:    \\033[1;32mRunning [✓]\\033[0m" || echo -e " Redis:    \\033[1;31mStopped [✗]\\033[0m"
+    pgrep -f nginx > /dev/null && echo -e " Nginx:    \\033[1;32mRunning [✓]\\033[0m" || echo -e " Nginx:    \\033[1;31mStopped [✗]\\033[0m"
+    pgrep -f php-fpm > /dev/null && echo -e " PHP-FPM:  \\033[1;32mRunning [✓]\\033[0m" || echo -e " PHP-FPM:  \\033[1;31mStopped [✗]\\033[0m"
+    pgrep -f "mariadb|mysqld" > /dev/null && echo -e " MariaDB:  \\033[1;32mRunning [✓]\\033[0m" || echo -e " MariaDB:  \\033[1;31mStopped [✗]\\033[0m"
+    pgrep -f redis-server > /dev/null && echo -e " Redis:    \\033[1;32mRunning [✓]\\033[0m" || echo -e " Redis:    \\033[1;31mStopped [✗]\\033[0m"
     echo -e "\\033[1;35m═══════════════════════════════════════════════════════\\033[0m\\n"
 
-    if check_server_running; then
+    if pgrep -f nginx > /dev/null || pgrep -f php-fpm > /dev/null || pgrep -f "mariadb|mysqld" > /dev/null || pgrep -f redis-server > /dev/null; then
         echo -e "\\033[1;36m═════════════════ [ SERVER INFORMATION ] ═════════════════\\033[0m"
         echo -e " 📂 Web Root Path : \\033[1;33m$HTDOCS_DIR\\033[0m"
         echo -e " 🌐 HTTP URL     : \\033[1;34mhttp://localhost:8080\\033[0m"
         echo -e " 🔒 HTTPS URL    : \\033[1;32mhttps://localhost:8443\\033[0m"
         echo -e " 🗄️  phpMyAdmin   : \\033[1;35mhttp://localhost:8080/phpmyadmin\\033[0m"
-        
-        if pgrep -f "cloudflared tunnel" > /dev/null && [ -s "$TUNNEL_URL_FILE" ]; then
-            G_URL=$(cat "$TUNNEL_URL_FILE")
-            echo -e " 🌍 Global URL    : \\033[1;32m$G_URL\\033[0m"
-        else
-            echo -e " 🌍 Global URL    : \\033[1;31mdisabled\\033[0m"
-        fi
         echo -e "\\033[1;36m══════════════════════════════════════════════════════════\\033[0m\\n"
     fi
+
 }}
 
 start_services() {{
     echo -e "\\033[1;34m[+] Starting MariaDB...\\033[0m"
     mkdir -p "$PREFIX/var/lib/mysql" "$PREFIX/var/run"
-    if ! pgrep -f "mariadbd|mysqld" > /dev/null; then
+    if ! pgrep -f "mariadb|mysqld" > /dev/null; then
         if [ ! -d "$PREFIX/var/lib/mysql/mysql" ]; then
             mariadb-install-db --datadir="$PREFIX/var/lib/mysql" > /dev/null 2>&1
         fi
-        mysqld_safe --datadir="$PREFIX/var/lib/mysql" > /dev/null 2>&1 &
+        if command -v mariadbd-safe &> /dev/null; then
+            mariadbd-safe --datadir="$PREFIX/var/lib/mysql" > /dev/null 2>&1 &
+        elif command -v mysqld_safe &> /dev/null; then
+            mysqld_safe --datadir="$PREFIX/var/lib/mysql" > /dev/null 2>&1 &
+        else
+            mariadbd --datadir="$PREFIX/var/lib/mysql" > /dev/null 2>&1 &
+        fi
     fi
 
     echo -e "\\033[1;34m[+] Starting Redis...\\033[0m"
     mkdir -p "$PREFIX/var/lib/redis" "$PREFIX/var/log"
     if ! pgrep -f redis-server > /dev/null; then
         if [ -f "$PREFIX/etc/redis.conf" ]; then
+            if ! grep -q "ignore-warnings ARM64-COW-BUG" "$PREFIX/etc/redis.conf"; then
+                echo "ignore-warnings ARM64-COW-BUG" >> "$PREFIX/etc/redis.conf"
+            fi
             redis-server "$PREFIX/etc/redis.conf" > /dev/null 2>&1
         else
             redis-server --daemonize yes --ignore-warnings ARM64-COW-BUG > /dev/null 2>&1
@@ -508,7 +396,6 @@ start_services() {{
 
     echo -e "\\033[1;34m[+] Starting Nginx...\\033[0m"
     if ! pgrep -f nginx > /dev/null; then
-        mkdir -p "$PREFIX/var/log/nginx" "$PREFIX/var/run"
         nginx > /dev/null 2>&1
     fi
 
@@ -526,77 +413,13 @@ start_services() {{
 
 stop_services() {{
     echo -e "\\033[1;33m[*] Stopping all services...\\033[0m"
-    stop_internet_access_silent
     pkill -f nginx > /dev/null 2>&1
     pkill -f php-fpm > /dev/null 2>&1
     pkill -f redis-server > /dev/null 2>&1
-    pkill -f mariadbd > /dev/null 2>&1
     pkill -f mysqld > /dev/null 2>&1
-    pkill -f mariadb > /dev/null 2>&1
-    sleep 1
-    
+    pkill -f mariadbd > /dev/null 2>&1
     echo -e "\\033[1;31m[✓] All services stopped.\\033[0m"
     sleep 1
-}}
-
-toggle_internet_access() {{
-    if pgrep -f "cloudflared tunnel" > /dev/null; then
-        stop_internet_access
-    else
-        start_internet_access
-    fi
-}}
-
-start_internet_access() {{
-    if ! pgrep -f "nginx" > /dev/null && ! pgrep -f "php-fpm" > /dev/null; then
-        echo -e "\\033[1;31m[!] يجب عليك تشغيل السيرفر أولاً قبل تفعيل هذه الخدمة.\\033[0m"
-        read -p "Press Enter to continue..."
-        return
-    fi
-
-    if ! ping -c 1 -W 2 8.8.8.8 > /dev/null 2>&1 && ! curl -s --connect-timeout 2 https://www.google.com > /dev/null 2>&1; then
-        echo -e "\\033[1;31m[!] يجب أن يتوفر وصول للإنترنت لتفعيل هذه الخدمة.\\033[0m"
-        read -p "Press Enter to continue..."
-        return
-    fi
-
-    echo -e "\\033[1;34m[*] Enabling Internet Access via Cloudflare Tunnel...\\033[0m"
-    mkdir -p "$PREFIX/tmp"
-    rm -f "$TUNNEL_LOG" "$TUNNEL_URL_FILE"
-
-    cloudflared tunnel --url http://localhost:8080 > "$TUNNEL_LOG" 2>&1 &
-    
-    echo -n "  Fetching Global URL"
-    for i in {{1..15}}; do
-        echo -n "."
-        sleep 1
-        if grep -q "trycloudflare.com" "$TUNNEL_LOG"; then
-            G_URL=$(grep -oE 'https://[-a-zA-Z0-9@:%._\\+~#=]+\\.trycloudflare\\.com' "$TUNNEL_LOG" | head -n 1)
-            if [ -n "$G_URL" ]; then
-                echo "$G_URL" > "$TUNNEL_URL_FILE"
-                echo -e "\\n\\033[1;32m[✓] Global Access Enabled Successfully!\\033[0m"
-                echo -e " 🌍 Global URL: \\033[1;36m$G_URL\\033[0m"
-                read -p "Press Enter to continue..."
-                return
-            fi
-        fi
-    done
-
-    echo -e "\\n\\033[1;31m[!] Failed to establish Cloudflare Tunnel. Please try again.\\033[0m"
-    stop_internet_access_silent
-    read -p "Press Enter to continue..."
-}}
-
-stop_internet_access() {{
-    echo -e "\\033[1;33m[*] Disabling Internet Access...\\033[0m"
-    stop_internet_access_silent
-    echo -e "\\033[1;32m[✓] Internet Access disabled.\\033[0m"
-    sleep 1
-}}
-
-stop_internet_access_silent() {{
-    pkill -9 -f "cloudflared tunnel" > /dev/null 2>&1
-    rm -f "$TUNNEL_LOG" "$TUNNEL_URL_FILE"
 }}
 
 restart_services() {{
@@ -605,46 +428,9 @@ restart_services() {{
     start_services
 }}
 
-fix_server() {{
-    echo -e "\\033[1;33m[*] Starting complete server stack wipe and fresh re-installation...\\033[0m"
-    stop_services
-
-    echo -e "\\033[1;33m[*] Deleting all configurations, binaries, databases and version files (except $HTDOCS_DIR)...\\033[0m"
-    rm -rf "$PREFIX/etc/nginx"
-    rm -rf "$PREFIX/etc/php-fpm.d"
-    rm -f "$PREFIX/etc/php/php.ini"
-    rm -f "$PREFIX/etc/redis.conf"
-    rm -rf "$PREFIX/var/lib/mysql"
-    rm -rf "$PREFIX/var/lib/redis"
-    rm -rf "$PREFIX/var/log"
-    rm -rf "$PREFIX/tmp"
-    rm -f "$HOME_DIR/storage/shared/server.crt"
-    rm -f "$VERSION_FILE"
-    rm -f "$PREFIX/bin/myserver"
-
-    mkdir -p "$PREFIX/tmp"
-    TMP_INSTALL="$PREFIX/tmp/install_server_fresh.py"
-
-    echo -e "\\033[1;36m[*] Fetching fresh installation script from repository...\\033[0m"
-    curl -sL "$GITHUB_RAW_URL/install_server.py" -o "$TMP_INSTALL"
-
-    if [ -s "$TMP_INSTALL" ]; then
-        echo -e "\\033[1;34m[*] Executing fresh setup & phpMyAdmin update...\\033[0m"
-        python3 "$TMP_INSTALL"
-        rm -f "$TMP_INSTALL"
-        echo -e "\\n\\033[1;32m[✓] Server repaired and reinstalled completely! Your web root ($HTDOCS_DIR) remains safe.\\033[0m"
-        echo -e "\\033[1;36m[*] Launching updated myserver binary...\\033[0m"
-        read -p "Press Enter to continue..."
-        exec "$PREFIX/bin/myserver"
-    else
-        echo -e "\\033[1;31m[!] Failed to download fresh installation script. Check your internet connection.\\033[0m"
-        read -p "Press Enter to continue..."
-    fi
-}}
-
 update_server() {{
     echo -e "\\033[1;36m[*] Checking for updates from remote repository...\\033[0m"
-    LOCAL_VER=$(cat "$VERSION_FILE" 2>/dev/null || echo "$CURRENT_VERSION")
+    LOCAL_VER=$(cat "$VERSION_FILE" 2>/dev/null || echo "{CURRENT_VERSION}")
     
     mkdir -p "$PREFIX/tmp"
     TMP_UPD="$PREFIX/tmp/install_server_latest.py"
@@ -657,20 +443,12 @@ update_server() {{
         return
     fi
     
-    REMOTE_VER=$(python3 -c '
-import re
-try:
-    with open("'"$TMP_UPD"'", "r", encoding="utf-8") as f:
-        m = re.search(r"CURRENT_VERSION\s*=\s*[\"'\']([^\"'\']+)[\"'\']", f.read())
-        print(m.group(1) if m else "'"$LOCAL_VER"'")
-except Exception:
-    print("'"$LOCAL_VER"'")
-')
+    REMOTE_VER=$(grep -oP 'CURRENT_VERSION\\s*=\\s*"\\K[^"]+' "$TMP_UPD" 2>/dev/null || echo "0.0.0")
     
     echo -e "  - Installed Version : \\033[1;33m$LOCAL_VER\\033[0m"
     echo -e "  - Remote Version    : \\033[1;32m$REMOTE_VER\\033[0m"
     
-    if [ "$LOCAL_VER" != "$REMOTE_VER" ] && [ -n "$REMOTE_VER" ]; then
+    if [ "$LOCAL_VER" != "$REMOTE_VER" ]; then
         echo -e "\\n\\033[1;35m[!] New version ($REMOTE_VER) available!\\033[0m"
         echo -e "\\033[1;33m📋 What's new in this release:\\033[0m"
         python3 -c '
@@ -678,7 +456,7 @@ import ast, re
 try:
     with open("'"$TMP_UPD"'", "r", encoding="utf-8") as f:
         content = f.read()
-    match = re.search(r"CHANGELOG\s*=\s*(\\[.*?\\])", content, re.DOTALL)
+    match = re.search(r"CHANGELOG\\s*=\\s*(\\[.*?\\])", content, re.DOTALL)
     if match:
         log_list = ast.literal_eval(match.group(1))
         for item in log_list:
@@ -725,15 +503,10 @@ uninstall_server() {{
             echo -e "\\033[1;33m[*] Stopping all services...\\033[0m"
             stop_services
 
-            echo -e "\\033[1;33m[*] Removing configuration files and certificates...\\033[0m"
-            rm -rf "$PREFIX/etc/nginx"
-            rm -rf "$PREFIX/etc/php-fpm.d"
-            rm -f "$PREFIX/etc/php/php.ini"
-            rm -f "$PREFIX/etc/redis.conf"
-            rm -rf "$PREFIX/var/lib/mysql"
-            rm -rf "$PREFIX/var/lib/redis"
-            rm -rf "$PREFIX/var/log"
-            rm -f "$HOME_DIR/storage/shared/server.crt"
+            echo -e "\\033[1;33m[*] Removing configuration files...\\033[0m"
+            rm -rf "$PREFIX/etc/nginx/ssl"
+            rm -f "$PREFIX/etc/nginx/nginx.conf"
+            rm -f "$PREFIX/etc/php-fpm.d/www.conf"
             rm -f "$VERSION_FILE"
             
             read -p "Do you also want to delete the web root ($HTDOCS_DIR)? (y/N): " del_web
@@ -758,20 +531,15 @@ uninstall_server() {{
     esac
 }}
 
-if [ -z "$1" ]; then
-    check_auto_update
-fi
-
 if [ -n "$1" ]; then
     case "$1" in
         start) start_services ;;
         stop) stop_services ;;
         restart) restart_services ;;
         status) show_banner_and_status; read -p "Press Enter to continue..." ;;
-        fix) fix_server ;;
         update) update_server ;;
         delete|uninstall) uninstall_server ;;
-        *) echo "Usage: myserver [start|stop|restart|status|fix|update|uninstall]" ;;
+        *) echo "Usage: myserver [start|stop|restart|status|update|uninstall]" ;;
     esac
     exit 0
 fi
@@ -779,43 +547,24 @@ fi
 while true; do
     show_banner_and_status
     echo -e "\\033[1;33mSelect an option:\\033[0m"
-    
-    if check_server_running; then
-        echo -e "\\033[1;33m 1) stop           (Stop all services)\\033[0m"
-    else
-        echo -e "\\033[1;33m 1) start          (Start all services)\\033[0m"
-    fi
-    
-    if pgrep -f "cloudflared tunnel" > /dev/null && [ -s "$TUNNEL_URL_FILE" ]; then
-        echo -e "\\033[1;33m 2) Disable Internet(Disable global Cloudflare access)\\033[0m"
-    else
-        echo -e "\\033[1;33m 2) Enable Internet (Enable global Cloudflare access)\\033[0m"
-    fi
-    
-    echo -e "\\033[1;33m 3) restart        (Restart all services)\\033[0m"
-    echo -e "\\033[1;33m 4) refresh status (Re-check server status)\\033[0m"
-    echo -e "\\033[1;33m 5) fix            (To fix issues)\\033[0m"
-    echo -e "\\033[1;33m 6) update         (Check and apply updates)\\033[0m"
-    echo -e "\\033[1;33m 7) uninstall      (Remove server stack)\\033[0m"
-    echo -e "\\033[1;33m 8) exit\\033[0m"
+    echo " 1) start          (Start all services)"
+    echo " 2) stop           (Stop all services)"
+    echo " 3) restart        (Restart all services)"
+    echo " 4) refresh status (Re-check server status)"
+    echo " 5) update         (Check and apply updates)"
+    echo " 6) uninstall      (Remove server stack)"
+    echo " 7) exit           (Exit & Stop Server)"
     echo ""
-    read -p "Enter choice [1-8]: " choice
+    read -p "Enter choice [1-7]: " choice
 
     case "$choice" in
-        1)
-            if check_server_running; then
-                stop_services
-            else
-                start_services
-            fi
-            ;;
-        2) toggle_internet_access ;;
-        3) restart_services ;;
+        1|start) start_services ;;
+        2|stop) stop_services ;;
+        3|restart) restart_services ;;
         4|refresh) continue ;;
-        5) fix_server ;;
-        6) update_server ;;
-        7|uninstall|delete) uninstall_server ;;
-        8|exit)
+        5|update) update_server ;;
+        6|uninstall|delete) uninstall_server ;;
+        7|exit)
             stop_services
             echo -e "\\033[1;32mServer stopped and exited successfully.\\033[0m"
             exit 0
@@ -824,7 +573,6 @@ while true; do
     esac
 done
 """
-
     try:
         bin_path.write_text(script_content, encoding='utf-8')
         bin_path.chmod(0o755)
@@ -853,7 +601,7 @@ def main():
         steps = [
             ("Updating Packages", "pkg update -y && pkg upgrade -y"),
             ("Storage Setup", None),
-            ("Installing Core Software & Cloudflared", "pkg install -y nginx php php-fpm mariadb redis openssl-tool curl tar git wget cloudflared"),
+            ("Installing Core Software", "pkg install -y nginx php php-fpm mariadb redis openssl-tool curl tar git wget"),
             ("MariaDB Initialization", setup_mariadb),
             ("Redis Setup", setup_redis),
             ("PHP-FPM Configuration", setup_php_fpm),
