@@ -17,7 +17,8 @@ CHANGELOG = [
     "Added Global URL feature via Cloudflare Tunnel with dynamic toggle option",
     "Fixed MariaDB process termination issues when stopping services",
     "Fixed Nginx start failures and connection refused errors",
-    "Updated CLI menu structure with status validation for Internet Access"
+    "Updated CLI menu structure with status validation for Internet Access",
+    "Fixed SyntaxWarning invalid escape sequences in Python 3.12+"
 ]
 
 # System and Environment Paths
@@ -46,7 +47,7 @@ def setup_mariadb():
         run_dir.mkdir(parents=True, exist_ok=True)
         if not (data_dir / "mysql").exists():
             run_cmd(f"mariadb-install-db --datadir='{data_dir}'")
-            print("\033[1;32m [✓] MariaDB database initialized. \033[0m")
+            print(r"\033[1;32m [✓] MariaDB database initialized. \033[0m")
         return True
     except Exception as e:
         print(f"\033[1;31m [!] MariaDB init error: {e}\033[0m")
@@ -63,7 +64,7 @@ def setup_redis():
         redis_conf_content = f"dir {redis_data}\nport 6379\nbind 127.0.0.1\ndaemonize yes\nlogfile {log_dir}/redis.log\nignore-warnings ARM64-COW-BUG\n"
         redis_conf.write_text(redis_conf_content)
         
-        print("\033[1;32m [✓] Redis configured (ARM64 warning suppressed). \033[0m")
+        print(r"\033[1;32m [✓] Redis configured (ARM64 warning suppressed). \033[0m")
         return True
     except Exception as e:
         print(f"\033[1;31m [!] Redis init error: {e}\033[0m")
@@ -86,7 +87,7 @@ pm.min_spare_servers = 1
 pm.max_spare_servers = 3
 """
         www_conf.write_text(conf_content)
-        print("\033[1;32m [✓] PHP-FPM configured (Port 9000). \033[0m")
+        print(r"\033[1;32m [✓] PHP-FPM configured (Port 9000). \033[0m")
         return True
     except Exception as e:
         print(f"\033[1;31m [!] PHP-FPM config error: {e}\033[0m")
@@ -128,7 +129,7 @@ IP.1 = 127.0.0.1
         if (HOME / "storage/shared").exists():
             shutil.copy(cert_path, public_cert)
 
-        print("\033[1;32m [✓] SSL Certificates generated (v3_req SAN enabled). \033[0m")
+        print(r"\033[1;32m [✓] SSL Certificates generated (v3_req SAN enabled). \033[0m")
         return True
     except Exception as e:
         print(f"\033[1;31m [!] SSL generation error: {e}\033[0m")
@@ -140,7 +141,6 @@ def setup_nginx():
         cert_path = SSL_DIR / "server.crt"
         key_path = SSL_DIR / "server.key"
         
-        # Ensure log directories exist
         (PREFIX / "var/log/nginx").mkdir(parents=True, exist_ok=True)
 
         nginx_config = f"""\
@@ -214,7 +214,7 @@ http {{
 }}
 """
         conf_path.write_text(nginx_config)
-        print("\033[1;32m [✓] Nginx configured with PHP-FPM & SSL. \033[0m")
+        print(r"\033[1;32m [✓] Nginx configured with PHP-FPM & SSL. \033[0m")
         return True
     except Exception as e:
         print(f"\033[1;31m [!] Nginx config error: {e}\033[0m")
@@ -256,7 +256,7 @@ extension=gd
     try:
         php_ini_path.parent.mkdir(parents=True, exist_ok=True)
         php_ini_path.write_text(php_ini_content)
-        print("\033[1;32m [✓] php.ini updated & PHP Sessions initialized. \033[0m")
+        print(r"\033[1;32m [✓] php.ini updated & PHP Sessions initialized. \033[0m")
         return True
     except Exception as e:
         print(f"\033[1;31m [!] php.ini error: {e}\033[0m")
@@ -281,7 +281,7 @@ def setup_htdocs():
 </IfModule>
 """
             htaccess_file.write_text(htaccess_content)
-            print("\033[1;32m [✓] Default .htaccess file created in root htdocs. \033[0m")
+            print(r"\033[1;32m [✓] Default .htaccess file created in root htdocs. \033[0m")
 
         info_dir = HTDOCS_DIR / "phpinfo"
         info_dir.mkdir(exist_ok=True)
@@ -297,9 +297,9 @@ def install_phpmyadmin():
 
     try:
         if is_update:
-            print("\033[1;34m [*] Checking and updating phpMyAdmin to latest version... \033[0m")
+            print(r"\033[1;34m [*] Checking and updating phpMyAdmin to latest version... \033[0m")
         else:
-            print("\033[1;34m [*] Downloading and installing phpMyAdmin... \033[0m")
+            print(r"\033[1;34m [*] Downloading and installing phpMyAdmin... \033[0m")
 
         TMP_DIR.mkdir(parents=True, exist_ok=True)
         tar_file = TMP_DIR / "pma.tar.gz"
@@ -307,7 +307,7 @@ def install_phpmyadmin():
         
         run_cmd(f"curl -sL '{url}' -o '{tar_file}'")
         if not tar_file.exists() or tar_file.stat().st_size == 0:
-            print("\033[1;31m [!] Failed to download phpMyAdmin. \033[0m")
+            print(r"\033[1;31m [!] Failed to download phpMyAdmin. \033[0m")
             return False
 
         config_file = pma_dir / "config.inc.php"
@@ -341,9 +341,9 @@ def install_phpmyadmin():
         pma_tmp.mkdir(exist_ok=True)
 
         if is_update:
-            print("\033[1;32m [✓] phpMyAdmin updated to latest version successfully. \033[0m")
+            print(r"\033[1;32m [✓] phpMyAdmin updated to latest version successfully. \033[0m")
         else:
-            print("\033[1;32m [✓] phpMyAdmin installed with login configuration. \033[0m")
+            print(r"\033[1;32m [✓] phpMyAdmin installed with login configuration. \033[0m")
         return True
     except Exception as e:
         print(f"\033[1;31m [!] phpMyAdmin error: {e}\033[0m")
@@ -353,7 +353,7 @@ def create_myserver_cli():
     bin_path = PREFIX / "bin/myserver"
     VERSION_FILE.write_text(CURRENT_VERSION)
 
-    script_content = f"""#!/data/data/com.termux/files/usr/bin/bash
+    script_content = r"""#!/data/data/com.termux/files/usr/bin/bash
 
 PREFIX="{PREFIX}"
 HOME_DIR="{HOME}"
@@ -362,6 +362,14 @@ VERSION_FILE="{VERSION_FILE}"
 GITHUB_RAW_URL="{GITHUB_RAW_URL}"
 TUNNEL_LOG="$PREFIX/tmp/cloudflared.log"
 TUNNEL_URL_FILE="$PREFIX/tmp/cloudflared_url.txt"
+
+check_server_running() {{
+    if pgrep -f "nginx" > /dev/null || pgrep -f "php-fpm" > /dev/null || pgrep -f "mariadbd|mysqld" > /dev/null || pgrep -f "redis-server" > /dev/null; then
+        return 0
+    else
+        return 1
+    fi
+}}
 
 check_auto_update() {{
     if ping -c 1 -W 2 8.8.8.8 > /dev/null 2>&1 || curl -s --connect-timeout 2 https://www.google.com > /dev/null 2>&1; then
@@ -372,19 +380,19 @@ check_auto_update() {{
         curl -sL --connect-timeout 3 "$GITHUB_RAW_URL/install_server.py" -o "$TMP_AUTO_UPD"
         
         if [ -s "$TMP_AUTO_UPD" ]; then
-            REMOTE_VER=$(grep -oP 'CURRENT_VERSION\\s*=\\s*"\\K[^"]+' "$TMP_AUTO_UPD" 2>/dev/null || echo "$LOCAL_VER")
+            REMOTE_VER=$(grep -oP 'CURRENT_VERSION\s*=\s*"\K[^"]+' "$TMP_AUTO_UPD" 2>/dev/null || echo "$LOCAL_VER")
             
             if [ "$LOCAL_VER" != "$REMOTE_VER" ] && [ "$REMOTE_VER" != "0.0.0" ]; then
-                echo -e "\\n\\033[1;35m══════════════════════════════════════════════════════\\033[0m"
-                echo -e "\\033[1;33m 🚀 NEW UPDATE AVAILABLE: Version $REMOTE_VER (Current: $LOCAL_VER)\\033[0m"
-                echo -e "\\033[1;35m══════════════════════════════════════════════════════\\033[0m"
-                echo -e "\\033[1;36m📋 Release Details & What's New:\\033[0m"
+                echo -e "\n\033[1;35m══════════════════════════════════════════════════════\033[0m"
+                echo -e "\033[1;33m 🚀 NEW UPDATE AVAILABLE: Version $REMOTE_VER (Current: $LOCAL_VER)\033[0m"
+                echo -e "\033[1;35m══════════════════════════════════════════════════════\033[0m"
+                echo -e "\033[1;36m📋 Release Details & What's New:\033[0m"
                 python3 -c '
 import ast, re
 try:
     with open("'"$TMP_AUTO_UPD"'", "r", encoding="utf-8") as f:
         content = f.read()
-    match = re.search(r"CHANGELOG\\s*=\\s*(\\[.*?\\])", content, re.DOTALL)
+    match = re.search(r"CHANGELOG\s*=\s*(\[.*?\])", content, re.DOTALL)
     if match:
         log_list = ast.literal_eval(match.group(1))
         for item in log_list:
@@ -398,18 +406,18 @@ except Exception:
                 read -p "Would you like to install this update now? (y/N): " confirm_update
                 case "$confirm_update" in
                     [yY][eE][sS]|[yY])
-                        echo -e "\\033[1;33m[*] Stopping running services before update...\\033[0m"
+                        echo -e "\033[1;33m[*] Stopping running services before update...\033[0m"
                         stop_services
-                        echo -e "\\033[1;34m[*] Installing update...\\033[0m"
+                        echo -e "\033[1;34m[*] Installing update...\033[0m"
                         python3 "$TMP_AUTO_UPD"
                         rm -f "$TMP_AUTO_UPD"
-                        echo -e "\\n\\033[1;32m[✓] Updated to version $REMOTE_VER successfully!\\033[0m"
-                        echo -e "\\033[1;36m[*] Press Enter to launch updated myserver manager...\\033[0m"
+                        echo -e "\n\033[1;32m[✓] Updated to version $REMOTE_VER successfully!\033[0m"
+                        echo -e "\033[1;36m[*] Press Enter to launch updated myserver manager...\033[0m"
                         read -r
                         exec "$PREFIX/bin/myserver"
                         ;;
                     *)
-                        echo -e "\\033[1;33m[i] Update postponed. Starting server manager...\\033[0m\\n"
+                        echo -e "\033[1;33m[i] Update postponed. Starting server manager...\033[0m\n"
                         rm -f "$TMP_AUTO_UPD"
                         sleep 1
                         ;;
@@ -425,49 +433,49 @@ except Exception:
 
 show_banner_and_status() {{
     clear
-    echo -e "\\033[1;36m"
+    echo -e "\033[1;36m"
     echo "  __  __       _____                                "
-    echo " |  \\/  |     / ____|                               "
-    echo " | \\  / |0_ _| (___   ___  _ __ __   _____ _ __ "
-    echo " | |\\/| | | | |\\___ \\ / _ \\| '__|\\ \\ / / _ \\ '__|"
-    echo " | |  | | |_| |____) |  __/| |    \\ V /  __/ |   "
-    echo " |_|  |_|\\__, |_____/ \\___|_|     \\_/ \\___|_|   "
+    echo " |  \/  |     / ____|                               "
+    echo " | \  / |0_ _| (___   ___  _ __ __   _____ _ __ "
+    echo " | |\/| | | | |\___ \ / _ \| '__|\ \ / / _ \ '__|"
+    echo " | |  | | |_| |____) |  __/| |    \ V /  __/ |   "
+    echo " |_|  |_|\__, |_____/ \___|_|     \_/ \___|_|   "
     echo "          __/ |                                  "
     echo "         |___/        Server Manager v{CURRENT_VERSION}  "
-    echo -e "\\033[0m"
+    echo -e "\033[0m"
 
-    echo -e "\\033[1;33m═════════════════ [ DEVELOPER INFO ] ═════════════════\\033[0m"
-    echo -e " 👤 Developer : \\033[1;37mElias Esmail\\033[0m"
-    echo -e " 📱 WhatsApp  : \\033[1;32m+967771902342\\033[0m"
-    echo -e " 🔗 GitHub    : \\033[1;36mhttps://github.com/elias0esmail\\033[0m"
-    echo -e "\\033[1;33m══════════════════════════════════════════════════════\\033[0m\\n"
+    echo -e "\033[1;33m═════════════════ [ DEVELOPER INFO ] ═════════════════\033[0m"
+    echo -e " 👤 Developer : \033[1;37mElias Esmail\033[0m"
+    echo -e " 📱 WhatsApp  : \033[1;32m+967771902342\033[0m"
+    echo -e " 🔗 GitHub    : \033[1;36mhttps://github.com/elias0esmail\033[0m"
+    echo -e "\033[1;33m══════════════════════════════════════════════════════\033[0m\n"
     
-    echo -e "\\033[1;35m═════════════════ [ SERVICES STATUS ] ═════════════════\\033[0m"
-    pgrep -f "nginx" > /dev/null && echo -e " Nginx:    \\033[1;32mRunning [✓]\\033[0m" || echo -e " Nginx:    \\033[1;31mStopped [✗]\\033[0m"
-    pgrep -f "php-fpm" > /dev/null && echo -e " PHP-FPM:  \\033[1;32mRunning [✓]\\033[0m" || echo -e " PHP-FPM:  \\033[1;31mStopped [✗]\\033[0m"
-    pgrep -f "mariadbd|mysqld" > /dev/null && echo -e " MariaDB:  \\033[1;32mRunning [✓]\\033[0m" || echo -e " MariaDB:  \\033[1;31mStopped [✗]\\033[0m"
-    pgrep -f "redis-server" > /dev/null && echo -e " Redis:    \\033[1;32mRunning [✓]\\033[0m" || echo -e " Redis:    \\033[1;31mStopped [✗]\\033[0m"
-    echo -e "\\033[1;35m═══════════════════════════════════════════════════════\\033[0m\\n"
+    echo -e "\033[1;35m═════════════════ [ SERVICES STATUS ] ═════════════════\033[0m"
+    pgrep -f "nginx" > /dev/null && echo -e " Nginx:    \033[1;32mRunning [✓]\033[0m" || echo -e " Nginx:    \033[1;31mStopped [✗]\033[0m"
+    pgrep -f "php-fpm" > /dev/null && echo -e " PHP-FPM:  \033[1;32mRunning [✓]\033[0m" || echo -e " PHP-FPM:  \033[1;31mStopped [✗]\033[0m"
+    pgrep -f "mariadbd|mysqld" > /dev/null && echo -e " MariaDB:  \033[1;32mRunning [✓]\033[0m" || echo -e " MariaDB:  \033[1;31mStopped [✗]\033[0m"
+    pgrep -f "redis-server" > /dev/null && echo -e " Redis:    \033[1;32mRunning [✓]\033[0m" || echo -e " Redis:    \033[1;31mStopped [✗]\033[0m"
+    echo -e "\033[1;35m═══════════════════════════════════════════════════════\033[0m\n"
 
-    if pgrep -f "nginx" > /dev/null || pgrep -f "php-fpm" > /dev/null || pgrep -f "mariadbd|mysqld" > /dev/null || pgrep -f "redis-server" > /dev/null; then
-        echo -e "\\033[1;36m═════════════════ [ SERVER INFORMATION ] ═════════════════\\033[0m"
-        echo -e " 📂 Web Root Path : \\033[1;33m$HTDOCS_DIR\\033[0m"
-        echo -e " 🌐 HTTP URL     : \\033[1;34mhttp://localhost:8080\\033[0m"
-        echo -e " 🔒 HTTPS URL    : \\033[1;32mhttps://localhost:8443\\033[0m"
-        echo -e " 🗄️  phpMyAdmin   : \\033[1;35mhttp://localhost:8080/phpmyadmin\\033[0m"
+    if check_server_running; then
+        echo -e "\033[1;36m═════════════════ [ SERVER INFORMATION ] ═════════════════\033[0m"
+        echo -e " 📂 Web Root Path : \033[1;33m$HTDOCS_DIR\033[0m"
+        echo -e " 🌐 HTTP URL     : \033[1;34mhttp://localhost:8080\033[0m"
+        echo -e " 🔒 HTTPS URL    : \033[1;32mhttps://localhost:8443\033[0m"
+        echo -e " 🗄️  phpMyAdmin   : \033[1;35mhttp://localhost:8080/phpmyadmin\033[0m"
         
         if pgrep -f "cloudflared tunnel" > /dev/null && [ -s "$TUNNEL_URL_FILE" ]; then
             G_URL=$(cat "$TUNNEL_URL_FILE")
-            echo -e " 🌍 Global URL    : \\033[1;32m$G_URL\\033[0m"
+            echo -e " 🌍 Global URL    : \033[1;32m$G_URL\033[0m"
         else
-            echo -e " 🌍 Global URL    : \\033[1;31mdisable\\033[0m"
+            echo -e " 🌍 Global URL    : \033[1;31mdisable\033[0m"
         fi
-        echo -e "\\033[1;36m══════════════════════════════════════════════════════════\\033[0m\\n"
+        echo -e "\033[1;36m══════════════════════════════════════════════════════════\033[0m\n"
     fi
 }}
 
 start_services() {{
-    echo -e "\\033[1;34m[+] Starting MariaDB...\\033[0m"
+    echo -e "\033[1;34m[+] Starting MariaDB...\033[0m"
     mkdir -p "$PREFIX/var/lib/mysql" "$PREFIX/var/run"
     if ! pgrep -f "mariadbd|mysqld" > /dev/null; then
         if [ ! -d "$PREFIX/var/lib/mysql/mysql" ]; then
@@ -482,7 +490,7 @@ start_services() {{
         fi
     fi
 
-    echo -e "\\033[1;34m[+] Starting Redis...\\033[0m"
+    echo -e "\033[1;34m[+] Starting Redis...\033[0m"
     mkdir -p "$PREFIX/var/lib/redis" "$PREFIX/var/log"
     if ! pgrep -f redis-server > /dev/null; then
         if [ -f "$PREFIX/etc/redis.conf" ]; then
@@ -495,21 +503,21 @@ start_services() {{
         fi
     fi
 
-    echo -e "\\033[1;34m[+] Starting PHP-FPM...\\033[0m"
+    echo -e "\033[1;34m[+] Starting PHP-FPM...\033[0m"
     if ! pgrep -f php-fpm > /dev/null; then
         php-fpm > /dev/null 2>&1
     fi
 
-    echo -e "\\033[1;34m[+] Starting Nginx...\\033[0m"
+    echo -e "\033[1;34m[+] Starting Nginx...\033[0m"
     if ! pgrep -f nginx > /dev/null; then
         mkdir -p "$PREFIX/var/log/nginx" "$PREFIX/var/run"
         nginx > /dev/null 2>&1
     fi
 
     sleep 1.5
-    echo -e "\\033[1;32m[✓] Services started successfully.\\033[0m"
+    echo -e "\033[1;32m[✓] Services started successfully.\033[0m"
 
-    echo -e "\\033[1;33m[*] Launching HTTPS URL in browser...\\033[0m"
+    echo -e "\033[1;33m[*] Launching HTTPS URL in browser...\033[0m"
     if command -v termux-open &> /dev/null; then
         termux-open https://localhost:8443
     elif command -v xdg-open &> /dev/null; then
@@ -519,7 +527,7 @@ start_services() {{
 }}
 
 stop_services() {{
-    echo -e "\\033[1;33m[*] Stopping all services...\\033[0m"
+    echo -e "\033[1;33m[*] Stopping all services...\033[0m"
     stop_internet_access_silent
     pkill -9 -f nginx > /dev/null 2>&1
     pkill -9 -f php-fpm > /dev/null 2>&1
@@ -527,7 +535,7 @@ stop_services() {{
     pkill -9 -f mariadbd > /dev/null 2>&1
     pkill -9 -f mysqld > /dev/null 2>&1
     pkill -9 -f mariadb > /dev/null 2>&1
-    echo -e "\\033[1;31m[✓] All services stopped.\\033[0m"
+    echo -e "\033[1;31m[✓] All services stopped.\033[0m"
     sleep 1
 }}
 
@@ -541,48 +549,48 @@ toggle_internet_access() {{
 
 start_internet_access() {{
     if ! pgrep -f "nginx" > /dev/null && ! pgrep -f "php-fpm" > /dev/null; then
-        echo -e "\\033[1;31m[!] يجب عليك تشغيل السيرفر أولاً قبل تفعيل هذه الخدمة.\\033[0m"
+        echo -e "\033[1;31m[!] يجب عليك تشغيل السيرفر أولاً قبل تفعيل هذه الخدمة.\033[0m"
         read -p "Press Enter to continue..."
         return
     fi
 
     if ! ping -c 1 -W 2 8.8.8.8 > /dev/null 2>&1 && ! curl -s --connect-timeout 2 https://www.google.com > /dev/null 2>&1; then
-        echo -e "\\033[1;31m[!] يجب أن يتوفر وصول للإنترنت لتفعيل هذه الخدمة.\\033[0m"
+        echo -e "\033[1;31m[!] يجب أن يتوفر وصول للإنترنت لتفعيل هذه الخدمة.\033[0m"
         read -p "Press Enter to continue..."
         return
     fi
 
-    echo -e "\\033[1;34m[*] Enabling Internet Access via Cloudflare Tunnel...\\033[0m"
+    echo -e "\033[1;34m[*] Enabling Internet Access via Cloudflare Tunnel...\033[0m"
     mkdir -p "$PREFIX/tmp"
     rm -f "$TUNNEL_LOG" "$TUNNEL_URL_FILE"
 
     cloudflared tunnel --url http://localhost:8080 > "$TUNNEL_LOG" 2>&1 &
     
     echo -n "  Fetching Global URL"
-    for i in {{1..15}}; do
+    for i in {1..15}; do
         echo -n "."
         sleep 1
         if grep -q "trycloudflare.com" "$TUNNEL_LOG"; then
-            G_URL=$(grep -o 'https://[-a-zA-Z0-9@:%._\+~#=]\+\.trycloudflare\.com' "$TUNNEL_LOG" | head -n 1)
+            G_URL=$(grep -oE 'https://[-a-zA-Z0-9@:%._\+~#=]+\.trycloudflare\.com' "$TUNNEL_LOG" | head -n 1)
             if [ -n "$G_URL" ]; then
                 echo "$G_URL" > "$TUNNEL_URL_FILE"
-                echo -e "\\n\\033[1;32m[✓] Global Access Enabled Successfully!\\033[0m"
-                echo -e " 🌍 Global URL: \\033[1;36m$G_URL\\033[0m"
+                echo -e "\n\033[1;32m[✓] Global Access Enabled Successfully!\033[0m"
+                echo -e " 🌍 Global URL: \033[1;36m$G_URL\033[0m"
                 read -p "Press Enter to continue..."
                 return
             fi
         fi
     done
 
-    echo -e "\\n\\033[1;31m[!] Failed to establish Cloudflare Tunnel. Please try again.\\033[0m"
+    echo -e "\n\033[1;31m[!] Failed to establish Cloudflare Tunnel. Please try again.\033[0m"
     stop_internet_access_silent
     read -p "Press Enter to continue..."
 }}
 
 stop_internet_access() {{
-    echo -e "\\033[1;33m[*] Disabling Internet Access...\\033[0m"
+    echo -e "\033[1;33m[*] Disabling Internet Access...\033[0m"
     stop_internet_access_silent
-    echo -e "\\033[1;32m[✓] Internet Access disabled.\\033[0m"
+    echo -e "\033[1;32m[✓] Internet Access disabled.\033[0m"
     sleep 1
 }}
 
@@ -598,10 +606,10 @@ restart_services() {{
 }}
 
 fix_server() {{
-    echo -e "\\033[1;33m[*] Starting complete server stack wipe and fresh re-installation...\\033[0m"
+    echo -e "\033[1;33m[*] Starting complete server stack wipe and fresh re-installation...\033[0m"
     stop_services
 
-    echo -e "\\033[1;33m[*] Deleting all configurations, binaries, databases and version files (except $HTDOCS_DIR)...\\033[0m"
+    echo -e "\033[1;33m[*] Deleting all configurations, binaries, databases and version files (except $HTDOCS_DIR)...\033[0m"
     rm -rf "$PREFIX/etc/nginx"
     rm -rf "$PREFIX/etc/php-fpm.d"
     rm -f "$PREFIX/etc/php/php.ini"
@@ -617,25 +625,25 @@ fix_server() {{
     mkdir -p "$PREFIX/tmp"
     TMP_INSTALL="$PREFIX/tmp/install_server_fresh.py"
 
-    echo -e "\\033[1;36m[*] Fetching fresh installation script from repository...\\033[0m"
+    echo -e "\033[1;36m[*] Fetching fresh installation script from repository...\033[0m"
     curl -sL "$GITHUB_RAW_URL/install_server.py" -o "$TMP_INSTALL"
 
     if [ -s "$TMP_INSTALL" ]; then
-        echo -e "\\033[1;34m[*] Executing fresh setup & phpMyAdmin update...\\033[0m"
+        echo -e "\033[1;34m[*] Executing fresh setup & phpMyAdmin update...\033[0m"
         python3 "$TMP_INSTALL"
         rm -f "$TMP_INSTALL"
-        echo -e "\\n\\033[1;32m[✓] Server repaired and reinstalled completely! Your web root ($HTDOCS_DIR) remains safe.\\033[0m"
-        echo -e "\\033[1;36m[*] Launching updated myserver binary...\\033[0m"
+        echo -e "\n\033[1;32m[✓] Server repaired and reinstalled completely! Your web root ($HTDOCS_DIR) remains safe.\033[0m"
+        echo -e "\033[1;36m[*] Launching updated myserver binary...\033[0m"
         read -p "Press Enter to continue..."
         exec "$PREFIX/bin/myserver"
     else
-        echo -e "\\033[1;31m[!] Failed to download fresh installation script. Check your internet connection.\\033[0m"
+        echo -e "\033[1;31m[!] Failed to download fresh installation script. Check your internet connection.\033[0m"
         read -p "Press Enter to continue..."
     fi
 }}
 
 update_server() {{
-    echo -e "\\033[1;36m[*] Checking for updates from remote repository...\\033[0m"
+    echo -e "\033[1;36m[*] Checking for updates from remote repository...\033[0m"
     LOCAL_VER=$(cat "$VERSION_FILE" 2>/dev/null || echo "{CURRENT_VERSION}")
     
     mkdir -p "$PREFIX/tmp"
@@ -643,26 +651,26 @@ update_server() {{
     curl -sL "$GITHUB_RAW_URL/install_server.py" -o "$TMP_UPD"
     
     if [ ! -s "$TMP_UPD" ]; then
-        echo -e "\\033[1;31m[!] Connection failed or remote script missing.\\033[0m"
+        echo -e "\033[1;31m[!] Connection failed or remote script missing.\033[0m"
         rm -f "$TMP_UPD"
         read -p "Press Enter to continue..."
         return
     fi
     
-    REMOTE_VER=$(grep -oP 'CURRENT_VERSION\\s*=\\s*"\\K[^"]+' "$TMP_UPD" 2>/dev/null || echo "0.0.0")
+    REMOTE_VER=$(grep -oP 'CURRENT_VERSION\s*=\s*"\K[^"]+' "$TMP_UPD" 2>/dev/null || echo "0.0.0")
     
-    echo -e "  - Installed Version : \\033[1;33m$LOCAL_VER\\033[0m"
-    echo -e "  - Remote Version    : \\033[1;32m$REMOTE_VER\\033[0m"
+    echo -e "  - Installed Version : \033[1;33m$LOCAL_VER\033[0m"
+    echo -e "  - Remote Version    : \033[1;32m$REMOTE_VER\033[0m"
     
     if [ "$LOCAL_VER" != "$REMOTE_VER" ]; then
-        echo -e "\\n\\033[1;35m[!] New version ($REMOTE_VER) available!\\033[0m"
-        echo -e "\\033[1;33m📋 What's new in this release:\\033[0m"
+        echo -e "\n\033[1;35m[!] New version ($REMOTE_VER) available!\033[0m"
+        echo -e "\033[1;33m📋 What's new in this release:\033[0m"
         python3 -c '
 import ast, re
 try:
     with open("'"$TMP_UPD"'", "r", encoding="utf-8") as f:
         content = f.read()
-    match = re.search(r"CHANGELOG\\s*=\\s*(\\[.*?\\])", content, re.DOTALL)
+    match = re.search(r"CHANGELOG\s*=\s*(\[.*?\])", content, re.DOTALL)
     if match:
         log_list = ast.literal_eval(match.group(1))
         for item in log_list:
@@ -676,40 +684,40 @@ except Exception:
         read -p "Download and install update now? (y/N): " confirm
         case "$confirm" in
             [yY][eE][sS]|[yY])
-                echo -e "\\033[1;33m[*] Stopping running services before update...\\033[0m"
+                echo -e "\033[1;33m[*] Stopping running services before update...\033[0m"
                 stop_services
-                echo -e "\\033[1;34m[*] Installing update...\\033[0m"
+                echo -e "\033[1;34m[*] Installing update...\033[0m"
                 python3 "$TMP_UPD"
                 rm -f "$TMP_UPD"
-                echo -e "\\n\\033[1;32m[✓] Updated to version $REMOTE_VER successfully!\\033[0m"
-                echo -e "\\033[1;36m[*] Press Enter to close this session and launch updated myserver...\\033[0m"
+                echo -e "\n\033[1;32m[✓] Updated to version $REMOTE_VER successfully!\033[0m"
+                echo -e "\033[1;36m[*] Press Enter to close this session and launch updated myserver...\033[0m"
                 read -r
                 exec "$PREFIX/bin/myserver"
                 ;;
             *)
-                echo -e "\\033[1;33m[i] Update cancelled by user.\\033[0m"
+                echo -e "\033[1;33m[i] Update cancelled by user.\033[0m"
                 rm -f "$TMP_UPD"
                 read -p "Press Enter to continue..."
                 ;;
         esac
     else
-        echo -e "\\033[1;32m[✓] You are already on the latest version ($LOCAL_VER).\\033[0m"
+        echo -e "\033[1;32m[✓] You are already on the latest version ($LOCAL_VER).\033[0m"
         rm -f "$TMP_UPD"
         read -p "Press Enter to continue..."
     fi
 }}
 
 uninstall_server() {{
-    echo -e "\\033[1;31m════════════════════════════════════════════\\033[0m"
-    echo -e "\\033[1;31m   ⚠️  WARNING: UNINSTALL MYSERVER STACK  ⚠️ \\033[0m"
-    echo -e "\\033[1;31m════════════════════════════════════════════\\033[0m"
+    echo -e "\033[1;31m════════════════════════════════════════════\033[0m"
+    echo -e "\033[1;31m   ⚠️  WARNING: UNINSTALL MYSERVER STACK  ⚠️ \033[0m"
+    echo -e "\033[1;31m════════════════════════════════════════════\033[0m"
     read -p "Are you sure you want to completely uninstall myserver? (y/N): " confirm
     case "$confirm" in
         [yY][eE][sS]|[yY])
-            echo -e "\\033[1;33m[*] Stopping all services...\\033[0m"
+            echo -e "\033[1;33m[*] Stopping all services...\033[0m"
             stop_services
 
-            echo -e "\\033[1;33m[*] Removing configuration files and certificates...\\033[0m"
+            echo -e "\033[1;33m[*] Removing configuration files and certificates...\033[0m"
             rm -rf "$PREFIX/etc/nginx"
             rm -rf "$PREFIX/etc/php-fpm.d"
             rm -f "$PREFIX/etc/php/php.ini"
@@ -724,19 +732,19 @@ uninstall_server() {{
             case "$del_web" in
                 [yY][eE][sS]|[yY])
                     rm -rf "$HTDOCS_DIR"
-                    echo -e "\\033[1;32m[✓] Web root deleted.\\033[0m"
+                    echo -e "\033[1;32m[✓] Web root deleted.\033[0m"
                     ;;
                 *)
-                    echo -e "\\033[1;36m[i] Web root preserved.\\033[0m"
+                    echo -e "\033[1;36m[i] Web root preserved.\033[0m"
                     ;;
             esac
 
             rm -f "$PREFIX/bin/myserver"
-            echo -e "\\033[1;32m[✓] Uninstalled successfully.\\033[0m"
+            echo -e "\033[1;32m[✓] Uninstalled successfully.\033[0m"
             exit 0
             ;;
         *)
-            echo -e "\\033[1;36m[i] Uninstall cancelled.\\033[0m"
+            echo -e "\033[1;36m[i] Uninstall cancelled.\033[0m"
             sleep 1
             ;;
     esac
@@ -762,47 +770,64 @@ fi
 
 while true; do
     show_banner_and_status
-    echo -e "\\033[1;33mSelect an option:\\033[0m"
-    echo " 1) start"
-    echo " 2) stop"
+    echo -e "\033[1;33mSelect an option:\033[0m"
     
-    if pgrep -f "cloudflared tunnel" > /dev/null && [ -s "$TUNNEL_URL_FILE" ]; then
-        echo " 3) Disable Internet Access"
+    if check_server_running; then
+        echo " 1) stop           (Stop all services)"
     else
-        echo " 3) Enable Internet Access"
+        echo " 1) start          (Start all services)"
     fi
     
-    echo " 4) restart"
-    echo " 5) refresh status"
-    echo " 6) fix"
-    echo " 7) update"
-    echo " 8) uninstall"
-    echo " 9) exit"
+    if pgrep -f "cloudflared tunnel" > /dev/null && [ -s "$TUNNEL_URL_FILE" ]; then
+        echo " 2) Disable Internet Access"
+    else
+        echo " 2) Enable Internet Access"
+    fi
+    
+    echo " 3) restart        (Restart all services)"
+    echo " 4) refresh status (Re-check server status)"
+    echo " 5) fix            (To fix issues)"
+    echo " 6) update         (Check and apply updates)"
+    echo " 7) uninstall      (Remove server stack)"
+    echo " 8) exit"
     echo ""
-    read -p "Enter choice [1-9]: " choice
+    read -p "Enter choice [1-8]: " choice
 
     case "$choice" in
-        1) start_services ;;
-        2) stop_services ;;
-        3) toggle_internet_access ;;
-        4) restart_services ;;
-        5|refresh) continue ;;
-        6) fix_server ;;
-        7) update_server ;;
-        8|uninstall|delete) uninstall_server ;;
-        9|exit)
+        1)
+            if check_server_running; then
+                stop_services
+            else
+                start_services
+            fi
+            ;;
+        2) toggle_internet_access ;;
+        3) restart_services ;;
+        4|refresh) continue ;;
+        5) fix_server ;;
+        6) update_server ;;
+        7|uninstall|delete) uninstall_server ;;
+        8|exit)
             stop_services
-            echo -e "\\033[1;32mServer stopped and exited successfully.\\033[0m"
+            echo -e "\033[1;32mServer stopped and exited successfully.\033[0m"
             exit 0
             ;;
-        *) echo -e "\\033[1;31mInvalid choice!\\033[0m"; sleep 1 ;;
+        *) echo -e "\033[1;31mInvalid choice!\033[0m"; sleep 1 ;;
     esac
 done
-"""
+""".format(
+        PREFIX=PREFIX,
+        HOME=HOME,
+        HTDOCS_DIR=HTDOCS_DIR,
+        VERSION_FILE=VERSION_FILE,
+        GITHUB_RAW_URL=GITHUB_RAW_URL,
+        CURRENT_VERSION=CURRENT_VERSION
+    )
+
     try:
         bin_path.write_text(script_content, encoding='utf-8')
         bin_path.chmod(0o755)
-        print("\033[1;32m [✓] CLI Tool 'myserver' configured. \033[0m")
+        print(r"\033[1;32m [✓] CLI Tool 'myserver' configured. \033[0m")
         return True
     except Exception as e:
         print(f"\033[1;31m [!] CLI creation error: {e}\033[0m")
@@ -813,10 +838,10 @@ def cleanup_repository():
         cwd = Path.cwd().resolve()
         if cwd not in [HOME, PREFIX, Path('/'), Path('/data/data/com.termux/files')]:
             if (cwd / "install_server.py").exists() or (cwd / ".git").exists():
-                print("\033[1;33m[*] Cleaning up downloaded repository folder...\033[0m")
+                print(r"\033[1;33m[*] Cleaning up downloaded repository folder...\033[0m")
                 os.chdir(HOME)
                 shutil.rmtree(cwd, ignore_errors=True)
-                print("\033[1;32m[✓] Downloaded repository folder deleted successfully.\033[0m")
+                print(r"\033[1;32m[✓] Downloaded repository folder deleted successfully.\033[0m")
     except Exception as e:
         print(f"\033[1;31m [!] Cleanup notice: {e}\033[0m")
 
