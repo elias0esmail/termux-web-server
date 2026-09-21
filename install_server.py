@@ -18,7 +18,8 @@ CHANGELOG = [
     "Added dynamic Internet Enable/Disable option in CLI menu",
     "Auto-stop Cloudflare tunnel when stopping server or exiting CLI",
     "Added internet-enable and internet-disable CLI commands",
-    "Added reinstall option to fix installation issues by reinstalling from repository"
+    "Added reinstall option to fix installation issues by reinstalling from repository",
+    "Menu options and prompt are now yellow; developer name is bold green"
 ]
 
 # System and Environment Paths
@@ -372,8 +373,8 @@ show_banner_and_status() {{
     echo -e "\\033[0m"
 
     echo -e "\\033[1;33m============= [ DEVELOPER INFO ] ==============\\033[0m"
-    echo -e " Developer : \\033[1;37mElias Esmail\\033[0m"
-    echo -e " WhatsApp  : \\033[1;32m+967771902342\\033[0m"
+    echo -e " Developer : \\033[1;32mElias Esmail\\033[0m"
+    echo -e " WhatsApp  : \\033[1;32mhttps://api.whatsapp.com/send?phone=967771902342\\033[0m"
     echo -e " GitHub    : \\033[1;36mhttps://github.com/elias0esmail\\033[0m"
     echo -e "\\033[1;33m================================================\\033[0m\\n"
 
@@ -752,23 +753,23 @@ while true; do
 
     echo -e "\\033[1;33mSelect an option:\\033[0m"
     if [ "$SERVER_RUNNING" -eq 1 ]; then
-        echo " 1) stop           (Stop all services)"
+        echo -e "\\033[1;33m 1) stop             (Stop all services)\\033[0m"
     else
-        echo " 1) start          (Start all services)"
+        echo -e "\\033[1;33m 1) start            (Start all services)\\033[0m"
     fi
     if is_tunnel_running; then
-        echo " 2) Disable Internet (disable internet access)"
+        echo -e "\\033[1;33m 2) Disable Internet (disable internet access)\\033[0m"
     else
-        echo " 2) Enable Internet  (enable internet access)"
+        echo -e "\\033[1;33m 2) Enable Internet  (enable internet access)\\033[0m"
     fi
-    echo " 3) restart        (Restart all services)"
-    echo " 4) refresh status (Re-check server status)"
-    echo " 5) update         (Check and apply updates)"
-    echo " 6) reinstall      (To fix issues)"
-    echo " 7) uninstall      (Remove server stack)"
-    echo " 8) exit           (Exit & Stop Server)"
+    echo -e "\\033[1;33m 3) restart          (Restart all services)\\033[0m"
+    echo -e "\\033[1;33m 4) refresh status   (Re-check server status)\\033[0m"
+    echo -e "\\033[1;33m 5) update           (Check and apply updates)\\033[0m"
+    echo -e "\\033[1;33m 6) reinstall        (To fix issues)\\033[0m"
+    echo -e "\\033[1;33m 7) uninstall        (Remove server stack)\\033[0m"
+    echo -e "\\033[1;33m 8) exit             (Exit & Stop Server)\\033[0m"
     echo ""
-    read -p "Enter choice [1-8]: " choice
+    read -p $'\\033[1;33mEnter choice [1-8]: \\033[0m' choice
 
     case "$choice" in
         1)
