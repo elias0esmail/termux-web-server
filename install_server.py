@@ -11,13 +11,14 @@ import string
 from pathlib import Path
 
 # Current Version & Release Notes
-CURRENT_VERSION = "1.6.5"
+CURRENT_VERSION = "2.8.1"
 CHANGELOG = [
     "Added cloudflared installation for public tunnel support",
     "Added Global URL field to server information panel",
     "Added dynamic Internet Enable/Disable option in CLI menu",
     "Auto-stop Cloudflare tunnel when stopping server or exiting CLI",
-    "Added internet-enable and internet-disable CLI commands"
+    "Added internet-enable and internet-disable CLI commands",
+    "Added reinstall option to fix installation issues by reinstalling from repository"
 ]
 
 # System and Environment Paths
@@ -637,6 +638,48 @@ except Exception:
     fi
 }}
 
+reinstall_server() {{
+    echo -e "\\033[1;35m============================================\\033[0m"
+    echo -e "\\033[1;35m   REINSTALL MYSERVER STACK (Fix Issues)    \\033[0m"
+    echo -e "\\033[1;35m============================================\\033[0m"
+    echo -e " This will reinstall the server stack using the latest"
+    echo -e " version available in the repository."
+    echo -e " Your web root ($HTDOCS_DIR) will NOT be deleted."
+    echo ""
+    read -p "Are you sure you want to reinstall myserver? (y/N): " confirm
+    case "$confirm" in
+        [yY][eE][sS]|[yY])
+            echo -e "\\033[1;36m[*] Downloading latest installer from repository...\\033[0m"
+            mkdir -p "$PREFIX/tmp"
+            TMP_UPD="$PREFIX/tmp/install_server_latest.py"
+            curl -sL --max-time 30 "$GITHUB_RAW_URL/install_server.py" -o "$TMP_UPD" 2>/dev/null
+
+            if [ ! -s "$TMP_UPD" ]; then
+                echo -e "\\033[1;31m[!] Failed to download installer. Check your internet connection.\\033[0m"
+                rm -f "$TMP_UPD"
+                read -p "Press Enter to continue..."
+                return
+            fi
+
+            echo -e "\\033[1;33m[*] Stopping running services before reinstall...\\033[0m"
+            stop_services
+
+            echo -e "\\033[1;34m[*] Reinstalling server stack...\\033[0m"
+            python3 "$TMP_UPD"
+            rm -f "$TMP_UPD"
+
+            echo -e "\\n\\033[1;32m[OK] Reinstall completed successfully!\\033[0m"
+            echo -e "\\033[1;36m[*] Press Enter to close this session and launch myserver...\\033[0m"
+            read -r
+            exec "$PREFIX/bin/myserver"
+            ;;
+        *)
+            echo -e "\\033[1;36m[INFO] Reinstall cancelled by user.\\033[0m"
+            sleep 1
+            ;;
+    esac
+}}
+
 uninstall_server() {{
     echo -e "\\033[1;31m============================================\\033[0m"
     echo -e "\\033[1;31m   WARNING: UNINSTALL MYSERVER STACK        \\033[0m"
@@ -683,10 +726,11 @@ if [ -n "$1" ]; then
         restart) restart_services ;;
         status) show_banner_and_status; read -p "Press Enter to continue..." ;;
         update) update_server manual ;;
+        reinstall) reinstall_server ;;
         internet-enable|enable-internet) enable_internet ;;
         internet-disable|disable-internet) disable_internet ;;
         delete|uninstall) uninstall_server ;;
-        *) echo "Usage: myserver [start|stop|restart|status|update|internet-enable|internet-disable|uninstall]" ;;
+        *) echo "Usage: myserver [start|stop|restart|status|update|reinstall|internet-enable|internet-disable|uninstall]" ;;
     esac
     exit 0
 fi
@@ -720,10 +764,11 @@ while true; do
     echo " 3) restart        (Restart all services)"
     echo " 4) refresh status (Re-check server status)"
     echo " 5) update         (Check and apply updates)"
-    echo " 6) uninstall      (Remove server stack)"
-    echo " 7) exit           (Exit & Stop Server)"
+    echo " 6) reinstall      (To fix issues)"
+    echo " 7) uninstall      (Remove server stack)"
+    echo " 8) exit           (Exit & Stop Server)"
     echo ""
-    read -p "Enter choice [1-7]: " choice
+    read -p "Enter choice [1-8]: " choice
 
     case "$choice" in
         1)
@@ -745,8 +790,9 @@ while true; do
         3|restart) restart_services ;;
         4|refresh) continue ;;
         5|update) update_server manual ;;
-        6|uninstall|delete) uninstall_server ;;
-        7|exit)
+        6|reinstall) reinstall_server ;;
+        7|uninstall|delete) uninstall_server ;;
+        8|exit)
             stop_services
             echo -e "\\033[1;32mServer stopped and exited successfully.\\033[0m"
             exit 0
