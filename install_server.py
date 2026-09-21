@@ -11,7 +11,7 @@ import string
 from pathlib import Path
 
 # Current Version & Release Notes
-CURRENT_VERSION = "1.6.3"
+CURRENT_VERSION = "1.6.4"
 CHANGELOG = [
     "Added Developer information section to the CLI status interface",
     "Preserved ARM64 kernel warning bypass for Redis on Android",
@@ -546,25 +546,43 @@ fi
 
 while true; do
     show_banner_and_status
+
+    # Detect current server state
+    if pgrep -f nginx > /dev/null || pgrep -f php-fpm > /dev/null || pgrep -f "mariadb|mysqld" > /dev/null || pgrep -f redis-server > /dev/null; then
+        SERVER_RUNNING=1
+    else
+        SERVER_RUNNING=0
+    fi
+
     echo -e "\\033[1;33mSelect an option:\\033[0m"
-    echo " 1) start          (Start all services)"
-    echo " 2) stop           (Stop all services)"
-    echo " 3) restart        (Restart all services)"
-    echo " 4) refresh status (Re-check server status)"
-    echo " 5) update         (Check and apply updates)"
-    echo " 6) uninstall      (Remove server stack)"
-    echo " 7) exit           (Exit & Stop Server)"
+    if [ "$SERVER_RUNNING" -eq 1 ]; then
+        echo " 1) stop           (Stop all services)"
+    else
+        echo " 1) start          (Start all services)"
+    fi
+    echo " 2) restart        (Restart all services)"
+    echo " 3) refresh status (Re-check server status)"
+    echo " 4) update         (Check and apply updates)"
+    echo " 5) uninstall      (Remove server stack)"
+    echo " 6) exit           (Exit & Stop Server)"
     echo ""
-    read -p "Enter choice [1-7]: " choice
+    read -p "Enter choice [1-6]: " choice
 
     case "$choice" in
-        1|start) start_services ;;
-        2|stop) stop_services ;;
-        3|restart) restart_services ;;
-        4|refresh) continue ;;
-        5|update) update_server ;;
-        6|uninstall|delete) uninstall_server ;;
-        7|exit)
+        1)
+            if [ "$SERVER_RUNNING" -eq 1 ]; then
+                stop_services
+            else
+                start_services
+            fi
+            ;;
+        start) start_services ;;
+        stop) stop_services ;;
+        2|restart) restart_services ;;
+        3|refresh) continue ;;
+        4|update) update_server ;;
+        5|uninstall|delete) uninstall_server ;;
+        6|exit)
             stop_services
             echo -e "\\033[1;32mServer stopped and exited successfully.\\033[0m"
             exit 0
