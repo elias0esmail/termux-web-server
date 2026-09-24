@@ -11,13 +11,12 @@ import string
 from pathlib import Path
 
 # Current Version & Release Notes
-CURRENT_VERSION = "2.9.0"
+CURRENT_VERSION = "2.10.0"
 CHANGELOG = [
-    "Added MariaDB Health Check to verify socket readiness before proceeding",
-    "Automated MariaDB security setup (secured root user & removed test databases)",
-    "Added SSL certificate subjectAltName optimizations for local browser trust",
-    "Added Quickstart App Installer (WordPress & Laravel) in CLI manager",
-    "Automated database creation for Quickstart frameworks"
+    "Fixed SyntaxWarning invalid escape sequence in CLI generator",
+    "Added Nextcloud Quickstart Installer to the interactive CLI",
+    "Automated database creation for Nextcloud framework",
+    "Improved MariaDB & Redis setup routines"
 ]
 
 # System and Environment Paths
@@ -242,10 +241,10 @@ def create_php_ini():
     TMP_DIR.mkdir(parents=True, exist_ok=True)
     
     php_ini_content = f"""\
-upload_max_filesize = 256M
+upload_max_filesize = 512M
 post_max_size = 512M
 memory_limit = 512M
-max_execution_time = 180
+max_execution_time = 300
 error_reporting = E_ALL & ~E_DEPRECATED
 display_errors = On
 date.timezone = UTC
@@ -269,6 +268,8 @@ extension=openssl
 extension=curl
 extension=zip
 extension=gd
+extension=intl
+extension=bcmath
 """
     try:
         php_ini_path.parent.mkdir(parents=True, exist_ok=True)
@@ -354,7 +355,7 @@ def create_myserver_cli():
     bin_path = PREFIX / "bin/myserver"
     VERSION_FILE.write_text(CURRENT_VERSION)
 
-    script_content = f"""#!/data/data/com.termux/files/usr/bin/bash
+    script_content = rf"""#!/data/data/com.termux/files/usr/bin/bash
 
 PREFIX="{PREFIX}"
 HTDOCS_DIR="{HTDOCS_DIR}"
@@ -396,34 +397,34 @@ has_internet() {{
 
 show_banner_and_status() {{
     clear
-    echo -e "\\033[1;36m"
+    echo -e "\033[1;36m"
     echo "  __  __       _____                                "
-    echo " |  \\/  |     / ____|                               "
-    echo " | \\  / |0_ _| (___   ___  _ __ __   _____ _ __ "
-    echo " | |\\/| | | | |\\___ \\ / _ \\| '__|\\ \\ / / _ \\ '__|"
-    echo " | |  | | |_| |____) |  __/| |    \\ V /  __/ |   "
-    echo " |_|  |_|\\__, |_____/ \\___||_|     \\_/ \\___|_|   "
+    echo " |  \/  |     / ____|                               "
+    echo " | \  / |0_ _| (___   ___  _ __ __   _____ _ __ "
+    echo " | |\/| | | | |\___ \ / _ \| '__|\ \ / / _ \ '__|"
+    echo " | |  | | |_| |____) |  __/| |    \ V /  __/ |   "
+    echo " |_|  |_|\__, |_____/ \___||_|     \_/ \___|_|   "
     echo "          __/ |                                  "
     echo "         |___/        Server Manager v{CURRENT_VERSION}  "
-    echo -e "\\033[0m"
+    echo -e "\033[0m"
 
-    echo -e "\\033[1;33m============= [ DEVELOPER INFO ] ==============\\033[0m"
-    echo -e " Developer : \\033[1;32mElias Esmail\\033[0m"
-    echo -e " WhatsApp  : \\033[1;32m+967771902342\\033[0m"
-    echo -e " GitHub    : \\033[1;36mhttps://github.com/elias0esmail\\033[0m"
-    echo -e "\\033[1;33m================================================\\033[0m\\n"
+    echo -e "\033[1;33m============= [ DEVELOPER INFO ] ==============\033[0m"
+    echo -e " Developer : \033[1;32mElias Esmail\033[0m"
+    echo -e " WhatsApp  : \033[1;32m+967771902342\033[0m"
+    echo -e " GitHub    : \033[1;36mhttps://github.com/elias0esmail\033[0m"
+    echo -e "\033[1;33m================================================\033[0m\n"
 
-    echo -e "\\033[1;35m============= [ SERVICES STATUS ] =============\\033[0m"
-    pgrep -f nginx > /dev/null && echo -e " Nginx:    \\033[1;32mRunning [OK]\\033[0m" || echo -e " Nginx:    \\033[1;31mStopped [X]\\033[0m"
-    pgrep -f php-fpm > /dev/null && echo -e " PHP-FPM:  \\033[1;32mRunning [OK]\\033[0m" || echo -e " PHP-FPM:  \\033[1;31mStopped [X]\\033[0m"
-    pgrep -f "mariadb|mysqld" > /dev/null && echo -e " MariaDB:  \\033[1;32mRunning [OK]\\033[0m" || echo -e " MariaDB:  \\033[1;31mStopped [X]\\033[0m"
-    pgrep -f redis-server > /dev/null && echo -e " Redis:    \\033[1;32mRunning [OK]\\033[0m" || echo -e " Redis:    \\033[1;31mStopped [X]\\033[0m"
+    echo -e "\033[1;35m============= [ SERVICES STATUS ] =============\033[0m"
+    pgrep -f nginx > /dev/null && echo -e " Nginx:    \033[1;32mRunning [OK]\033[0m" || echo -e " Nginx:    \033[1;31mStopped [X]\033[0m"
+    pgrep -f php-fpm > /dev/null && echo -e " PHP-FPM:  \033[1;32mRunning [OK]\033[0m" || echo -e " PHP-FPM:  \033[1;31mStopped [X]\033[0m"
+    pgrep -f "mariadb|mysqld" > /dev/null && echo -e " MariaDB:  \033[1;32mRunning [OK]\033[0m" || echo -e " MariaDB:  \033[1;31mStopped [X]\033[0m"
+    pgrep -f redis-server > /dev/null && echo -e " Redis:    \033[1;32mRunning [OK]\033[0m" || echo -e " Redis:    \033[1;31mStopped [X]\033[0m"
     if is_tunnel_running; then
-        echo -e " Tunnel:   \\033[1;32mRunning [OK]\\033[0m"
+        echo -e " Tunnel:   \033[1;32mRunning [OK]\033[0m"
     else
-        echo -e " Tunnel:   \\033[1;31mStopped [X]\\033[0m"
+        echo -e " Tunnel:   \033[1;31mStopped [X]\033[0m"
     fi
-    echo -e "\\033[1;35m===============================================\\033[0m\\n"
+    echo -e "\033[1;35m===============================================\033[0m\n"
 
     SVC_INFO=0
     if pgrep -f nginx > /dev/null || pgrep -f php-fpm > /dev/null || pgrep -f "mariadb|mysqld" > /dev/null || pgrep -f redis-server > /dev/null; then
@@ -437,22 +438,22 @@ show_banner_and_status() {{
     fi
 
     if [ "$SVC_INFO" -eq 1 ] || [ "$TUNNEL_ACTIVE" -eq 1 ]; then
-        echo -e "\\033[1;36m============= [ SERVER INFORMATION ] =============\\033[0m"
-        echo -e " Web Root Path : \\033[1;33m$HTDOCS_DIR\\033[0m"
-        echo -e " HTTP URL      : \\033[1;34mhttp://localhost:8080\\033[0m"
-        echo -e " HTTPS URL     : \\033[1;32mhttps://localhost:8443\\033[0m"
-        echo -e " phpMyAdmin    : \\033[1;35mhttp://localhost:8080/phpmyadmin\\033[0m"
+        echo -e "\033[1;36m============= [ SERVER INFORMATION ] =============\033[0m"
+        echo -e " Web Root Path : \033[1;33m$HTDOCS_DIR\033[0m"
+        echo -e " HTTP URL      : \033[1;34mhttp://localhost:8080\033[0m"
+        echo -e " HTTPS URL     : \033[1;32mhttps://localhost:8443\033[0m"
+        echo -e " phpMyAdmin    : \033[1;35mhttp://localhost:8080/phpmyadmin\033[0m"
         if [ "$TUNNEL_ACTIVE" -eq 1 ]; then
-            echo -e " Global URL    : \\033[1;32m$TUNNEL_URL_VAL\\033[0m"
+            echo -e " Global URL    : \033[1;32m$TUNNEL_URL_VAL\033[0m"
         else
-            echo -e " Global URL    : \\033[1;31mInactive\\033[0m"
+            echo -e " Global URL    : \033[1;31mInactive\033[0m"
         fi
-        echo -e "\\033[1;36m==================================================\\033[0m\\n"
+        echo -e "\033[1;36m==================================================\033[0m\n"
     fi
 }}
 
 start_services() {{
-    echo -e "\\033[1;34m[+] Starting MariaDB...\\033[0m"
+    echo -e "\033[1;34m[+] Starting MariaDB...\033[0m"
     mkdir -p "$PREFIX/var/lib/mysql" "$PREFIX/var/run/mysqld"
     if ! pgrep -f "mariadb|mysqld" > /dev/null; then
         if [ ! -d "$PREFIX/var/lib/mysql/mysql" ]; then
@@ -467,7 +468,7 @@ start_services() {{
         fi
         
         # Health check: Wait for socket creation
-        echo -e "\\033[1;33m[*] Waiting for MariaDB socket initialization...\\033[0m"
+        echo -e "\033[1;33m[*] Waiting for MariaDB socket initialization...\033[0m"
         i=0
         while [ $i -lt 15 ]; do
             if [ -S "$MARIADB_SOCKET" ]; then
@@ -478,7 +479,7 @@ start_services() {{
         done
     fi
 
-    echo -e "\\033[1;34m[+] Starting Redis...\\033[0m"
+    echo -e "\033[1;34m[+] Starting Redis...\033[0m"
     mkdir -p "$PREFIX/var/lib/redis" "$PREFIX/var/log"
     if ! pgrep -f redis-server > /dev/null; then
         if [ -f "$PREFIX/etc/redis.conf" ]; then
@@ -491,20 +492,20 @@ start_services() {{
         fi
     fi
 
-    echo -e "\\033[1;34m[+] Starting PHP-FPM...\\033[0m"
+    echo -e "\033[1;34m[+] Starting PHP-FPM...\033[0m"
     if ! pgrep -f php-fpm > /dev/null; then
         php-fpm > /dev/null 2>&1
     fi
 
-    echo -e "\\033[1;34m[+] Starting Nginx...\\033[0m"
+    echo -e "\033[1;34m[+] Starting Nginx...\033[0m"
     if ! pgrep -f nginx > /dev/null; then
         nginx > /dev/null 2>&1
     fi
 
     sleep 1.5
-    echo -e "\\033[1;32m[OK] Services started successfully.\\033[0m"
+    echo -e "\033[1;32m[OK] Services started successfully.\033[0m"
 
-    echo -e "\\033[1;33m[*] Launching HTTPS URL in browser...\\033[0m"
+    echo -e "\033[1;33m[*] Launching HTTPS URL in browser...\033[0m"
     if command -v termux-open &> /dev/null; then
         termux-open https://localhost:8443
     elif command -v xdg-open &> /dev/null; then
@@ -515,16 +516,16 @@ start_services() {{
 
 stop_services() {{
     if is_tunnel_running; then
-        echo -e "\\033[1;33m[*] Stopping internet tunnel...\\033[0m"
+        echo -e "\033[1;33m[*] Stopping internet tunnel...\033[0m"
         disable_internet
     fi
-    echo -e "\\033[1;33m[*] Stopping all services...\\033[0m"
+    echo -e "\033[1;33m[*] Stopping all services...\033[0m"
     pkill -f nginx > /dev/null 2>&1
     pkill -f php-fpm > /dev/null 2>&1
     pkill -f redis-server > /dev/null 2>&1
     pkill -f mysqld > /dev/null 2>&1
     pkill -f mariadbd > /dev/null 2>&1
-    echo -e "\\033[1;31m[OK] All services stopped.\\033[0m"
+    echo -e "\033[1;31m[OK] All services stopped.\033[0m"
     sleep 1
 }}
 
@@ -536,35 +537,35 @@ restart_services() {{
 
 enable_internet() {{
     if ! pgrep -f nginx > /dev/null && ! pgrep -f php-fpm > /dev/null && ! pgrep -f "mariadb|mysqld" > /dev/null && ! pgrep -f redis-server > /dev/null; then
-        echo -e "\\033[1;31m[!] Server is not running. Please start the server first.\\033[0m"
+        echo -e "\033[1;31m[!] Server is not running. Please start the server first.\033[0m"
         sleep 2
         return
     fi
 
     if is_tunnel_running; then
-        echo -e "\\033[1;33m[i] Internet tunnel is already running.\\033[0m"
+        echo -e "\033[1;33m[i] Internet tunnel is already running.\033[0m"
         sleep 1.5
         return
     fi
 
     if ! has_internet; then
-        echo -e "\\033[1;31m[!] No internet connection. Please connect to the internet and try again.\\033[0m"
+        echo -e "\033[1;31m[!] No internet connection. Please connect to the internet and try again.\033[0m"
         sleep 2
         return
     fi
 
-    echo -e "\\033[1;34m[*] Starting Cloudflare tunnel...\\033[0m"
+    echo -e "\033[1;34m[*] Starting Cloudflare tunnel...\033[0m"
     rm -f "$TUNNEL_PID_FILE" "$TUNNEL_URL_FILE" "$TUNNEL_LOG"
     cloudflared tunnel --url http://localhost:8080 > "$TUNNEL_LOG" 2>&1 &
     echo $! > "$TUNNEL_PID_FILE"
 
-    echo -e "\\033[1;33m[*] Waiting for the public URL...\\033[0m"
+    echo -e "\033[1;33m[*] Waiting for the public URL...\033[0m"
     FOUND_URL=""
     i=0
     while [ $i -lt 30 ]; do
         sleep 1
         i=$((i+1))
-        FOUND_URL=$(grep -oE 'https://[a-zA-Z0-9-]+\\.trycloudflare\\.com' "$TUNNEL_LOG" 2>/dev/null | head -n 1)
+        FOUND_URL=$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' "$TUNNEL_LOG" 2>/dev/null | head -n 1)
         if [ -n "$FOUND_URL" ]; then
             break
         fi
@@ -572,9 +573,9 @@ enable_internet() {{
 
     if [ -n "$FOUND_URL" ]; then
         echo "$FOUND_URL" > "$TUNNEL_URL_FILE"
-        echo -e "\\033[1;32m[OK] Global URL: $FOUND_URL\\033[0m"
+        echo -e "\033[1;32m[OK] Global URL: $FOUND_URL\033[0m"
     else
-        echo -e "\\033[1;31m[!] Failed to obtain the tunnel URL. Stopping tunnel.\\033[0m"
+        echo -e "\033[1;31m[!] Failed to obtain the tunnel URL. Stopping tunnel.\033[0m"
         disable_internet
     fi
     sleep 2
@@ -582,12 +583,12 @@ enable_internet() {{
 
 disable_internet() {{
     if ! is_tunnel_running; then
-        echo -e "\\033[1;33m[i] Internet tunnel is already disabled.\\033[0m"
+        echo -e "\033[1;33m[i] Internet tunnel is already disabled.\033[0m"
         sleep 1
         return
     fi
 
-    echo -e "\\033[1;33m[*] Stopping Cloudflare tunnel...\\033[0m"
+    echo -e "\033[1;33m[*] Stopping Cloudflare tunnel...\033[0m"
     if [ -f "$TUNNEL_PID_FILE" ]; then
         TPID=$(cat "$TUNNEL_PID_FILE" 2>/dev/null)
         if [ -n "$TPID" ]; then
@@ -598,70 +599,72 @@ disable_internet() {{
     fi
     pkill -f "cloudflared tunnel" > /dev/null 2>&1
     rm -f "$TUNNEL_PID_FILE" "$TUNNEL_URL_FILE" "$TUNNEL_LOG"
-    echo -e "\\033[1;31m[OK] Internet tunnel disabled.\\033[0m"
+    echo -e "\033[1;31m[OK] Internet tunnel disabled.\033[0m"
     sleep 1
 }}
 
 quickstart_menu() {{
-    echo -e "\\033[1;35m============================================\\033[0m"
-    echo -e "\\033[1;35m      QUICKSTART FRAMEWORK INSTALLER        \\033[0m"
-    echo -e "\\033[1;35m============================================\\033[0m"
+    echo -e "\033[1;35m============================================\033[0m"
+    echo -e "\033[1;35m      QUICKSTART FRAMEWORK INSTALLER        \033[0m"
+    echo -e "\033[1;35m============================================\033[0m"
     echo " 1) Install WordPress"
     echo " 2) Install Laravel Skeleton"
-    echo " 3) Back to main menu"
+    echo " 3) Install Nextcloud"
+    echo " 4) Back to main menu"
     echo ""
-    read -p $'\\033[1;33mSelect framework [1-3]: \\033[0m' q_choice
+    read -p $'\033[1;33mSelect framework [1-4]: \033[0m' q_choice
 
     case "$q_choice" in
         1) install_wordpress ;;
         2) install_laravel ;;
+        3) install_nextcloud ;;
         *) return ;;
     esac
 }}
 
 install_wordpress() {{
-    echo -e "\\033[1;34m[*] Preparing WordPress installation...\\033[0m"
+    echo -e "\033[1;34m[*] Preparing WordPress installation...\033[0m"
     WP_DIR="$HTDOCS_DIR/wordpress"
     if [ -d "$WP_DIR" ]; then
-        echo -e "\\033[1;31m[!] Folder $WP_DIR already exists.\\033[0m"
+        echo -e "\033[1;31m[!] Folder $WP_DIR already exists.\033[0m"
         read -p "Press Enter to return..."
         return
     fi
 
-    echo -e "\\033[1;33m[*] Downloading latest WordPress...\\033[0m"
+    echo -e "\033[1;33m[*] Downloading latest WordPress...\033[0m"
     mkdir -p "$PREFIX/tmp"
     WP_TAR="$PREFIX/tmp/wordpress.tar.gz"
     curl -sL https://wordpress.org/latest.tar.gz -o "$WP_TAR"
 
     if [ ! -s "$WP_TAR" ]; then
-        echo -e "\\033[1;31m[!] Download failed. Check internet connection.\\033[0m"
+        echo -e "\033[1;31m[!] Download failed. Check internet connection.\033[0m"
         rm -f "$WP_TAR"
         read -p "Press Enter to return..."
         return
     fi
 
-    echo -e "\\033[1;34m[*] Extracting WordPress into htdocs/wordpress...\\033[0m"
+    echo -e "\033[1;34m[*] Extracting WordPress into htdocs/wordpress...\033[0m"
     tar -xf "$WP_TAR" -C "$HTDOCS_DIR"
     rm -f "$WP_TAR"
 
     # Create Database
     if pgrep -f "mariadb|mysqld" > /dev/null && [ -S "$MARIADB_SOCKET" ]; then
-        echo -e "\\033[1;34m[*] Creating MariaDB database 'wordpress'...\\033[0m"
+        echo -e "\033[1;34m[*] Creating MariaDB database 'wordpress'...\033[0m"
         mysql -u root --socket="$MARIADB_SOCKET" -e "CREATE DATABASE IF NOT EXISTS wordpress DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" 2>/dev/null
     fi
 
-    echo -e "\\033[1;32m[✓] WordPress installed successfully!\\033[0m"
-    echo -e " URL      : \\033[1;34mhttp://localhost:8080/wordpress\\033[0m"
-    echo -e " Database : \\033[1;33mwordpress\\033[0m (User: root, Pass: [empty])"
+    echo -e "\033[1;32m[✓] WordPress installed successfully!\033[0m"
+    echo -e " URL      : \033[1;34mhttp://localhost:8080/wordpress\033[0m"
+    echo -e " Database : \033[1;33mwordpress\033[0m (User: root, Pass: [empty])"
     echo ""
     read -p "Press Enter to continue..."
 }}
 
 install_laravel() {{
-    echo -e "\\033[1;34m[*] Preparing Laravel project environment...\\033[0m"
+    echo -e "\033[1;34m[*] Preparing Laravel project environment...\033[0m"
     
     if ! command -v composer &> /dev/null; then
-        echo -e "\\033[1;33m[*] Installing Composer package...\\033[0m"
+        echo -e "\033[1;33m[*] Installing Composer package...\033[0m"
         pkg install composer -y
     fi
 
@@ -670,24 +673,62 @@ install_laravel() {{
     LARAVEL_DIR="$HTDOCS_DIR/$PROJECT_NAME"
 
     if [ -d "$LARAVEL_DIR" ]; then
-        echo -e "\\033[1;31m[!] Folder $LARAVEL_DIR already exists.\\033[0m"
+        echo -e "\033[1;31m[!] Folder $LARAVEL_DIR already exists.\033[0m"
         read -p "Press Enter to return..."
         return
     fi
 
-    echo -e "\\033[1;34m[*] Creating Laravel project (this may take a minute)...\\033[0m"
+    echo -e "\033[1;34m[*] Creating Laravel project (this may take a minute)...\033[0m"
     composer create-project --prefer-dist laravel/laravel "$LARAVEL_DIR"
 
     # Create Database
     DB_NAME=$(echo "$PROJECT_NAME" | tr '-' '_')
     if pgrep -f "mariadb|mysqld" > /dev/null && [ -S "$MARIADB_SOCKET" ]; then
-        echo -e "\\033[1;34m[*] Creating MariaDB database '$DB_NAME'...\\033[0m"
+        echo -e "\033[1;34m[*] Creating MariaDB database '$DB_NAME'...\033[0m"
         mysql -u root --socket="$MARIADB_SOCKET" -e "CREATE DATABASE IF NOT EXISTS \`$DB_NAME\` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" 2>/dev/null
     fi
 
-    echo -e "\\033[1;32m[✓] Laravel installed successfully!\\033[0m"
-    echo -e " URL      : \\033[1;34mhttp://localhost:8080/$PROJECT_NAME/public\\033[0m"
-    echo -e " Database : \\033[1;33m$DB_NAME\\033[0m (User: root, Pass: [empty])"
+    echo -e "\033[1;32m[✓] Laravel installed successfully!\033[0m"
+    echo -e " URL      : \033[1;34mhttp://localhost:8080/$PROJECT_NAME/public\033[0m"
+    echo -e " Database : \033[1;33m$DB_NAME\033[0m (User: root, Pass: [empty])"
+    echo ""
+    read -p "Press Enter to continue..."
+}}
+
+install_nextcloud() {{
+    echo -e "\033[1;34m[*] Preparing Nextcloud installation...\033[0m"
+    NC_DIR="$HTDOCS_DIR/nextcloud"
+    if [ -d "$NC_DIR" ]; then
+        echo -e "\033[1;31m[!] Folder $NC_DIR already exists.\033[0m"
+        read -p "Press Enter to return..."
+        return
+    fi
+
+    echo -e "\033[1;33m[*] Downloading latest Nextcloud release archive...\033[0m"
+    mkdir -p "$PREFIX/tmp"
+    NC_ZIP="$PREFIX/tmp/nextcloud.zip"
+    curl -sL https://download.nextcloud.com/server/releases/latest.zip -o "$NC_ZIP"
+
+    if [ ! -s "$NC_ZIP" ]; then
+        echo -e "\033[1;31m[!] Download failed. Check internet connection.\033[0m"
+        rm -f "$NC_ZIP"
+        read -p "Press Enter to return..."
+        return
+    fi
+
+    echo -e "\033[1;34m[*] Extracting Nextcloud into htdocs/nextcloud...\033[0m"
+    unzip -q "$NC_ZIP" -d "$HTDOCS_DIR"
+    rm -f "$NC_ZIP"
+
+    # Create Database
+    if pgrep -f "mariadb|mysqld" > /dev/null && [ -S "$MARIADB_SOCKET" ]; then
+        echo -e "\033[1;34m[*] Creating MariaDB database 'nextcloud'...\033[0m"
+        mysql -u root --socket="$MARIADB_SOCKET" -e "CREATE DATABASE IF NOT EXISTS nextcloud DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" 2>/dev/null
+    fi
+
+    echo -e "\033[1;32m[✓] Nextcloud installed successfully!\033[0m"
+    echo -e " URL      : \033[1;34mhttp://localhost:8080/nextcloud\033[0m"
+    echo -e " Database : \033[1;33mnextcloud\033[0m (User: root, Pass: [empty], Host: 127.0.0.1)"
     echo ""
     read -p "Press Enter to continue..."
 }}
@@ -696,7 +737,7 @@ update_server() {{
     MODE="$1"
 
     if [ "$MODE" != "auto" ]; then
-        echo -e "\\033[1;36m[*] Checking for updates from remote repository...\\033[0m"
+        echo -e "\033[1;36m[*] Checking for updates from remote repository...\033[0m"
     fi
 
     LOCAL_VER=$(cat "$VERSION_FILE" 2>/dev/null || echo "{CURRENT_VERSION}")
@@ -708,29 +749,29 @@ update_server() {{
     if [ ! -s "$TMP_UPD" ]; then
         rm -f "$TMP_UPD"
         if [ "$MODE" = "auto" ]; then
-            echo -e "\\033[1;33m[INFO] No internet connection or update server unreachable. Continuing normally...\\033[0m"
+            echo -e "\033[1;33m[INFO] No internet connection or update server unreachable. Continuing normally...\033[0m"
             sleep 1.2
             return
         fi
-        echo -e "\\033[1;31m[!] Connection failed or remote script missing.\\033[0m"
+        echo -e "\033[1;31m[!] Connection failed or remote script missing.\033[0m"
         read -p "Press Enter to continue..."
         return
     fi
     
-    REMOTE_VER=$(grep -oP 'CURRENT_VERSION\\s*=\\s*"\\K[^"]+' "$TMP_UPD" 2>/dev/null || echo "0.0.0")
+    REMOTE_VER=$(grep -oP 'CURRENT_VERSION\s*=\s*"\K[^"]+' "$TMP_UPD" 2>/dev/null || echo "0.0.0")
     
-    echo -e "  - Installed Version : \\033[1;33m$LOCAL_VER\\033[0m"
-    echo -e "  - Remote Version    : \\033[1;32m$REMOTE_VER\\033[0m"
+    echo -e "  - Installed Version : \033[1;33m$LOCAL_VER\033[0m"
+    echo -e "  - Remote Version    : \033[1;32m$REMOTE_VER\033[0m"
     
     if [ "$LOCAL_VER" != "$REMOTE_VER" ]; then
-        echo -e "\\n\\033[1;35m[!] New version ($REMOTE_VER) available!\\033[0m"
-        echo -e "\\033[1;33m[*] What is new in this release:\\033[0m"
+        echo -e "\n\033[1;35m[!] New version ($REMOTE_VER) available!\033[0m"
+        echo -e "\033[1;33m[*] What is new in this release:\033[0m"
         python3 -c '
 import ast, re
 try:
     with open("'"$TMP_UPD"'", "r", encoding="utf-8") as f:
         content = f.read()
-    match = re.search(r"CHANGELOG\\s*=\\s*(\\[.*?\\])", content, re.DOTALL)
+    match = re.search(r"CHANGELOG\s*=\s*(\[.*?\])", content, re.DOTALL)
     if match:
         log_list = ast.literal_eval(match.group(1))
         for item in log_list:
@@ -744,18 +785,18 @@ except Exception:
         read -p "Download and install update now? (y/N): " confirm
         case "$confirm" in
             [yY][eE][sS]|[yY])
-                echo -e "\\033[1;33m[*] Stopping running services before update...\\033[0m"
+                echo -e "\033[1;33m[*] Stopping running services before update...\033[0m"
                 stop_services
-                echo -e "\\033[1;34m[*] Installing update...\\033[0m"
+                echo -e "\033[1;34m[*] Installing update...\033[0m"
                 python3 "$TMP_UPD"
                 rm -f "$TMP_UPD"
-                echo -e "\\n\\033[1;32m[OK] Updated to version $REMOTE_VER successfully!\\033[0m"
-                echo -e "\\033[1;36m[*] Press Enter to close this session and launch updated myserver...\\033[0m"
+                echo -e "\n\033[1;32m[OK] Updated to version $REMOTE_VER successfully!\033[0m"
+                echo -e "\033[1;36m[*] Press Enter to close this session and launch updated myserver...\033[0m"
                 read -r
                 exec "$PREFIX/bin/myserver"
                 ;;
             *)
-                echo -e "\\033[1;33m[INFO] Update cancelled by user.\\033[0m"
+                echo -e "\033[1;33m[INFO] Update cancelled by user.\033[0m"
                 rm -f "$TMP_UPD"
                 if [ "$MODE" != "auto" ]; then
                     read -p "Press Enter to continue..."
@@ -765,7 +806,7 @@ except Exception:
                 ;;
         esac
     else
-        echo -e "\\033[1;32m[OK] You are already on the latest version ($LOCAL_VER).\\033[0m"
+        echo -e "\033[1;32m[OK] You are already on the latest version ($LOCAL_VER).\033[0m"
         rm -f "$TMP_UPD"
         if [ "$MODE" != "auto" ]; then
             read -p "Press Enter to continue..."
@@ -776,9 +817,9 @@ except Exception:
 }}
 
 reinstall_server() {{
-    echo -e "\\033[1;35m============================================\\033[0m"
-    echo -e "\\033[1;35m   REINSTALL MYSERVER STACK (Fix Issues)    \\033[0m"
-    echo -e "\\033[1;35m============================================\\033[0m"
+    echo -e "\033[1;35m============================================\033[0m"
+    echo -e "\033[1;35m   REINSTALL MYSERVER STACK (Fix Issues)    \033[0m"
+    echo -e "\033[1;35m============================================\033[0m"
     echo -e " This will reinstall the server stack using the latest"
     echo -e " version available in the repository."
     echo -e " Your web root ($HTDOCS_DIR) will NOT be deleted."
@@ -786,48 +827,48 @@ reinstall_server() {{
     read -p "Are you sure you want to reinstall myserver? (y/N): " confirm
     case "$confirm" in
         [yY][eE][sS]|[yY])
-            echo -e "\\033[1;36m[*] Downloading latest installer from repository...\\033[0m"
+            echo -e "\033[1;36m[*] Downloading latest installer from repository...\033[0m"
             mkdir -p "$PREFIX/tmp"
             TMP_UPD="$PREFIX/tmp/install_server_latest.py"
             curl -sL --max-time 30 "$GITHUB_RAW_URL/install_server.py" -o "$TMP_UPD" 2>/dev/null
 
             if [ ! -s "$TMP_UPD" ]; then
-                echo -e "\\033[1;31m[!] Failed to download installer. Check your internet connection.\\033[0m"
+                echo -e "\033[1;31m[!] Failed to download installer. Check your internet connection.\033[0m"
                 rm -f "$TMP_UPD"
                 read -p "Press Enter to continue..."
                 return
             fi
 
-            echo -e "\\033[1;33m[*] Stopping running services before reinstall...\\033[0m"
+            echo -e "\033[1;33m[*] Stopping running services before reinstall...\033[0m"
             stop_services
 
-            echo -e "\\033[1;34m[*] Reinstalling server stack...\\033[0m"
+            echo -e "\033[1;34m[*] Reinstalling server stack...\033[0m"
             python3 "$TMP_UPD"
             rm -f "$TMP_UPD"
 
-            echo -e "\\n\\033[1;32m[OK] Reinstall completed successfully!\\033[0m"
-            echo -e "\\033[1;36m[*] Press Enter to close this session and launch myserver...\\033[0m"
+            echo -e "\n\033[1;32m[OK] Reinstall completed successfully!\033[0m"
+            echo -e "\033[1;36m[*] Press Enter to close this session and launch myserver...\033[0m"
             read -r
             exec "$PREFIX/bin/myserver"
             ;;
         *)
-            echo -e "\\033[1;36m[INFO] Reinstall cancelled by user.\\033[0m"
+            echo -e "\033[1;36m[INFO] Reinstall cancelled by user.\033[0m"
             sleep 1
             ;;
     esac
 }}
 
 uninstall_server() {{
-    echo -e "\\033[1;31m============================================\\033[0m"
-    echo -e "\\033[1;31m   WARNING: UNINSTALL MYSERVER STACK        \\033[0m"
-    echo -e "\\033[1;31m============================================\\033[0m"
+    echo -e "\033[1;31m============================================\033[0m"
+    echo -e "\033[1;31m   WARNING: UNINSTALL MYSERVER STACK        \033[0m"
+    echo -e "\033[1;31m============================================\033[0m"
     read -p "Are you sure you want to completely uninstall myserver? (y/N): " confirm
     case "$confirm" in
         [yY][eE][sS]|[yY])
-            echo -e "\\033[1;33m[*] Stopping all services...\\033[0m"
+            echo -e "\033[1;33m[*] Stopping all services...\033[0m"
             stop_services
 
-            echo -e "\\033[1;33m[*] Removing configuration files...\\033[0m"
+            echo -e "\033[1;33m[*] Removing configuration files...\033[0m"
             rm -rf "$PREFIX/etc/nginx/ssl"
             rm -f "$PREFIX/etc/nginx/nginx.conf"
             rm -f "$PREFIX/etc/php-fpm.d/www.conf"
@@ -838,19 +879,19 @@ uninstall_server() {{
             case "$del_web" in
                 [yY][eE][sS]|[yY])
                     rm -rf "$HTDOCS_DIR"
-                    echo -e "\\033[1;32m[OK] Web root deleted.\\033[0m"
+                    echo -e "\033[1;32m[OK] Web root deleted.\033[0m"
                     ;;
                 *)
-                    echo -e "\\033[1;36m[INFO] Web root preserved.\\033[0m"
+                    echo -e "\033[1;36m[INFO] Web root preserved.\033[0m"
                     ;;
             esac
 
             rm -f "$PREFIX/bin/myserver"
-            echo -e "\\033[1;32m[OK] Uninstalled successfully.\\033[0m"
+            echo -e "\033[1;32m[OK] Uninstalled successfully.\033[0m"
             exit 0
             ;;
         *)
-            echo -e "\\033[1;36m[INFO] Uninstall cancelled.\\033[0m"
+            echo -e "\033[1;36m[INFO] Uninstall cancelled.\033[0m"
             sleep 1
             ;;
     esac
@@ -874,7 +915,7 @@ if [ -n "$1" ]; then
 fi
 
 # --- Auto-update check on interactive launch ---
-echo -e "\\033[1;36m[*] Checking for updates...\\033[0m"
+echo -e "\033[1;36m[*] Checking for updates...\033[0m"
 sleep 0.6
 update_server auto
 # -----------------------------------------------
@@ -888,26 +929,26 @@ while true; do
         SERVER_RUNNING=0
     fi
 
-    echo -e "\\033[1;33mSelect an option:\\033[0m"
+    echo -e "\033[1;33mSelect an option:\033[0m"
     if [ "$SERVER_RUNNING" -eq 1 ]; then
-        echo -e "\\033[1;33m 1) stop             (Stop all services)\\033[0m"
+        echo -e "\033[1;33m 1) stop             (Stop all services)\033[0m"
     else
-        echo -e "\\033[1;33m 1) start            (Start all services)\\033[0m"
+        echo -e "\033[1;33m 1) start            (Start all services)\033[0m"
     fi
     if is_tunnel_running; then
-        echo -e "\\033[1;33m 2) Disable Internet (disable internet access)\\033[0m"
+        echo -e "\033[1;33m 2) Disable Internet (disable internet access)\033[0m"
     else
-        echo -e "\\033[1;33m 2) Enable Internet  (enable internet access)\\033[0m"
+        echo -e "\033[1;33m 2) Enable Internet  (enable internet access)\033[0m"
     fi
-    echo -e "\\033[1;33m 3) restart          (Restart all services)\\033[0m"
-    echo -e "\\033[1;33m 4) quickstart       (Install WP / Laravel)\\033[0m"
-    echo -e "\\033[1;33m 5) refresh status   (Re-check server status)\\033[0m"
-    echo -e "\\033[1;33m 6) update           (Check and apply updates)\\033[0m"
-    echo -e "\\033[1;33m 7) reinstall        (To fix issues)\\033[0m"
-    echo -e "\\033[1;33m 8) uninstall        (Remove server stack)\\033[0m"
-    echo -e "\\033[1;33m 9) exit             (Exit & Stop Server)\\033[0m"
+    echo -e "\033[1;33m 3) restart          (Restart all services)\033[0m"
+    echo -e "\033[1;33m 4) quickstart       (Install WP / Laravel / Nextcloud)\033[0m"
+    echo -e "\033[1;33m 5) refresh status   (Re-check server status)\033[0m"
+    echo -e "\033[1;33m 6) update           (Check and apply updates)\033[0m"
+    echo -e "\033[1;33m 7) reinstall        (To fix issues)\033[0m"
+    echo -e "\033[1;33m 8) uninstall        (Remove server stack)\033[0m"
+    echo -e "\033[1;33m 9) exit             (Exit & Stop Server)\033[0m"
     echo ""
-    read -p $'\\033[1;33mEnter choice [1-9]: \\033[0m' choice
+    read -p $'\033[1;33mEnter choice [1-9]: \033[0m' choice
 
     case "$choice" in
         1)
@@ -934,10 +975,10 @@ while true; do
         8|uninstall|delete) uninstall_server ;;
         9|exit)
             stop_services
-            echo -e "\\033[1;32mServer stopped and exited successfully.\\033[0m"
+            echo -e "\033[1;32mServer stopped and exited successfully.\033[0m"
             exit 0
             ;;
-        *) echo -e "\\033[1;31mInvalid choice!\\033[0m"; sleep 1 ;;
+        *) echo -e "\033[1;31mInvalid choice!\033[0m"; sleep 1 ;;
     esac
 done
 """
@@ -969,7 +1010,7 @@ def main():
         steps = [
             ("Updating Packages", "pkg update -y"),
             ("Storage Setup", None),
-            ("Installing Core Software", "pkg install -y nginx php php-fpm mariadb redis openssl-tool curl tar git wget cloudflared || pkg install -y nginx php php-fpm mariadb redis openssl-tool curl tar git wget"),
+            ("Installing Core Software", "pkg install -y nginx php php-fpm mariadb redis openssl-tool curl tar unzip git wget cloudflared || pkg install -y nginx php php-fpm mariadb redis openssl-tool curl tar unzip git wget"),
             ("MariaDB Hardened Initialization", setup_mariadb),
             ("Redis Setup", setup_redis),
             ("PHP-FPM Configuration", setup_php_fpm),
