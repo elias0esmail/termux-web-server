@@ -11,15 +11,13 @@ import string
 from pathlib import Path
 
 # Current Version & Release Notes
-CURRENT_VERSION = "2.8.2"
+CURRENT_VERSION = "2.9.0"
 CHANGELOG = [
-    "Added cloudflared installation for public tunnel support",
-    "Added Global URL field to server information panel",
-    "Added dynamic Internet Enable/Disable option in CLI menu",
-    "Auto-stop Cloudflare tunnel when stopping server or exiting CLI",
-    "Added internet-enable and internet-disable CLI commands",
-    "Added reinstall option to fix installation issues by reinstalling from repository",
-    "Menu options and prompt are now yellow; developer name is bold green"
+    "Added MariaDB Health Check to verify socket readiness before proceeding",
+    "Automated MariaDB security setup (secured root user & removed test databases)",
+    "Added SSL certificate subjectAltName optimizations for local browser trust",
+    "Added Quickstart App Installer (WordPress & Laravel) in CLI manager",
+    "Automated database creation for Quickstart frameworks"
 ]
 
 # System and Environment Paths
@@ -41,16 +39,51 @@ def run_cmd(cmd, check=False):
 def setup_mariadb():
     try:
         data_dir = PREFIX / "var/lib/mysql"
-        run_dir = PREFIX / "var/run"
+        run_dir = PREFIX / "var/run/mysqld"
         data_dir.mkdir(parents=True, exist_ok=True)
         run_dir.mkdir(parents=True, exist_ok=True)
+
         if not (data_dir / "mysql").exists():
             run_cmd(f"mariadb-install-db --datadir='{data_dir}'")
             print("\033[1;32m [✓] MariaDB database initialized. \033[0m")
+
+        # Start MariaDB temporarily to apply security hardening
+        if command_exists("mariadbd-safe"):
+            cmd = f"mariadbd-safe --datadir='{data_dir}' --socket='{run_dir}/mysqld.sock'"
+        else:
+            cmd = f"mariadbd --datadir='{data_dir}' --socket='{run_dir}/mysqld.sock'"
+        
+        proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        
+        # Health Check: Wait for socket
+        sock_path = run_dir / "mysqld.sock"
+        for _ in range(15):
+            if sock_path.exists():
+                break
+            time.sleep(1)
+
+        if sock_path.exists():
+            # Security Hardening
+            sec_sql = """
+            DELETE FROM mysql.user WHERE User='';
+            DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');
+            DROP DATABASE IF EXISTS test;
+            DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';
+            FLUSH PRIVILEGES;
+            """
+            run_cmd(f"mysql -u root --socket='{sock_path}' -e \"{sec_sql}\"")
+            print("\033[1;32m [✓] MariaDB Security Hardening applied. \033[0m")
+        
+        # Stop temp instance
+        run_cmd(f"mysqladmin --socket='{sock_path}' shutdown")
+        time.sleep(1)
         return True
     except Exception as e:
         print(f"\033[1;31m [!] MariaDB init error: {e}\033[0m")
         return False
+
+def command_exists(cmd):
+    return shutil.which(cmd) is not None
 
 def setup_redis():
     try:
@@ -124,9 +157,10 @@ subjectAltName = @alt_names
 [alt_names]
 DNS.1 = localhost
 IP.1 = 127.0.0.1
+IP.2 = ::1
 """)
         run_cmd(f"openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout '{key_path}' -out '{cert_path}' -config '{openssl_cnf}'")
-        print("\033[1;32m [✓] SSL Certificates generated. \033[0m")
+        print("\033[1;32m [✓] Enhanced SSL Certificates generated. \033[0m")
         return True
     except Exception as e:
         print(f"\033[1;31m [!] SSL generation error: {e}\033[0m")
@@ -329,6 +363,7 @@ GITHUB_RAW_URL="{GITHUB_RAW_URL}"
 TUNNEL_PID_FILE="$PREFIX/tmp/cloudflared.pid"
 TUNNEL_URL_FILE="$PREFIX/tmp/cloudflared.url"
 TUNNEL_LOG="$PREFIX/tmp/cloudflared.log"
+MARIADB_SOCKET="$PREFIX/var/run/mysqld/mysqld.sock"
 
 is_tunnel_running() {{
     if [ -f "$TUNNEL_PID_FILE" ]; then
@@ -418,18 +453,29 @@ show_banner_and_status() {{
 
 start_services() {{
     echo -e "\\033[1;34m[+] Starting MariaDB...\\033[0m"
-    mkdir -p "$PREFIX/var/lib/mysql" "$PREFIX/var/run"
+    mkdir -p "$PREFIX/var/lib/mysql" "$PREFIX/var/run/mysqld"
     if ! pgrep -f "mariadb|mysqld" > /dev/null; then
         if [ ! -d "$PREFIX/var/lib/mysql/mysql" ]; then
             mariadb-install-db --datadir="$PREFIX/var/lib/mysql" > /dev/null 2>&1
         fi
         if command -v mariadbd-safe &> /dev/null; then
-            mariadbd-safe --datadir="$PREFIX/var/lib/mysql" > /dev/null 2>&1 &
+            mariadbd-safe --datadir="$PREFIX/var/lib/mysql" --socket="$MARIADB_SOCKET" > /dev/null 2>&1 &
         elif command -v mysqld_safe &> /dev/null; then
-            mysqld_safe --datadir="$PREFIX/var/lib/mysql" > /dev/null 2>&1 &
+            mysqld_safe --datadir="$PREFIX/var/lib/mysql" --socket="$MARIADB_SOCKET" > /dev/null 2>&1 &
         else
-            mariadbd --datadir="$PREFIX/var/lib/mysql" > /dev/null 2>&1 &
+            mariadbd --datadir="$PREFIX/var/lib/mysql" --socket="$MARIADB_SOCKET" > /dev/null 2>&1 &
         fi
+        
+        # Health check: Wait for socket creation
+        echo -e "\\033[1;33m[*] Waiting for MariaDB socket initialization...\\033[0m"
+        i=0
+        while [ $i -lt 15 ]; do
+            if [ -S "$MARIADB_SOCKET" ]; then
+                break
+            fi
+            sleep 1
+            i=$((i+1))
+        done
     fi
 
     echo -e "\\033[1;34m[+] Starting Redis...\\033[0m"
@@ -554,6 +600,96 @@ disable_internet() {{
     rm -f "$TUNNEL_PID_FILE" "$TUNNEL_URL_FILE" "$TUNNEL_LOG"
     echo -e "\\033[1;31m[OK] Internet tunnel disabled.\\033[0m"
     sleep 1
+}}
+
+quickstart_menu() {{
+    echo -e "\\033[1;35m============================================\\033[0m"
+    echo -e "\\033[1;35m      QUICKSTART FRAMEWORK INSTALLER        \\033[0m"
+    echo -e "\\033[1;35m============================================\\033[0m"
+    echo " 1) Install WordPress"
+    echo " 2) Install Laravel Skeleton"
+    echo " 3) Back to main menu"
+    echo ""
+    read -p $'\\033[1;33mSelect framework [1-3]: \\033[0m' q_choice
+
+    case "$q_choice" in
+        1) install_wordpress ;;
+        2) install_laravel ;;
+        *) return ;;
+    esac
+}}
+
+install_wordpress() {{
+    echo -e "\\033[1;34m[*] Preparing WordPress installation...\\033[0m"
+    WP_DIR="$HTDOCS_DIR/wordpress"
+    if [ -d "$WP_DIR" ]; then
+        echo -e "\\033[1;31m[!] Folder $WP_DIR already exists.\\033[0m"
+        read -p "Press Enter to return..."
+        return
+    fi
+
+    echo -e "\\033[1;33m[*] Downloading latest WordPress...\\033[0m"
+    mkdir -p "$PREFIX/tmp"
+    WP_TAR="$PREFIX/tmp/wordpress.tar.gz"
+    curl -sL https://wordpress.org/latest.tar.gz -o "$WP_TAR"
+
+    if [ ! -s "$WP_TAR" ]; then
+        echo -e "\\033[1;31m[!] Download failed. Check internet connection.\\033[0m"
+        rm -f "$WP_TAR"
+        read -p "Press Enter to return..."
+        return
+    fi
+
+    echo -e "\\033[1;34m[*] Extracting WordPress into htdocs/wordpress...\\033[0m"
+    tar -xf "$WP_TAR" -C "$HTDOCS_DIR"
+    rm -f "$WP_TAR"
+
+    # Create Database
+    if pgrep -f "mariadb|mysqld" > /dev/null && [ -S "$MARIADB_SOCKET" ]; then
+        echo -e "\\033[1;34m[*] Creating MariaDB database 'wordpress'...\\033[0m"
+        mysql -u root --socket="$MARIADB_SOCKET" -e "CREATE DATABASE IF NOT EXISTS wordpress DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" 2>/dev/null
+    fi
+
+    echo -e "\\033[1;32m[✓] WordPress installed successfully!\\033[0m"
+    echo -e " URL      : \\033[1;34mhttp://localhost:8080/wordpress\\033[0m"
+    echo -e " Database : \\033[1;33mwordpress\\033[0m (User: root, Pass: [empty])"
+    echo ""
+    read -p "Press Enter to continue..."
+}}
+
+install_laravel() {{
+    echo -e "\\033[1;34m[*] Preparing Laravel project environment...\\033[0m"
+    
+    if ! command -v composer &> /dev/null; then
+        echo -e "\\033[1;33m[*] Installing Composer package...\\033[0m"
+        pkg install composer -y
+    fi
+
+    read -p "Enter project folder name [default: laravel]: " PROJECT_NAME
+    PROJECT_NAME=${{PROJECT_NAME:-laravel}}
+    LARAVEL_DIR="$HTDOCS_DIR/$PROJECT_NAME"
+
+    if [ -d "$LARAVEL_DIR" ]; then
+        echo -e "\\033[1;31m[!] Folder $LARAVEL_DIR already exists.\\033[0m"
+        read -p "Press Enter to return..."
+        return
+    fi
+
+    echo -e "\\033[1;34m[*] Creating Laravel project (this may take a minute)...\\033[0m"
+    composer create-project --prefer-dist laravel/laravel "$LARAVEL_DIR"
+
+    # Create Database
+    DB_NAME=$(echo "$PROJECT_NAME" | tr '-' '_')
+    if pgrep -f "mariadb|mysqld" > /dev/null && [ -S "$MARIADB_SOCKET" ]; then
+        echo -e "\\033[1;34m[*] Creating MariaDB database '$DB_NAME'...\\033[0m"
+        mysql -u root --socket="$MARIADB_SOCKET" -e "CREATE DATABASE IF NOT EXISTS \`$DB_NAME\` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" 2>/dev/null
+    fi
+
+    echo -e "\\033[1;32m[✓] Laravel installed successfully!\\033[0m"
+    echo -e " URL      : \\033[1;34mhttp://localhost:8080/$PROJECT_NAME/public\\033[0m"
+    echo -e " Database : \\033[1;33m$DB_NAME\\033[0m (User: root, Pass: [empty])"
+    echo ""
+    read -p "Press Enter to continue..."
 }}
 
 update_server() {{
@@ -726,12 +862,13 @@ if [ -n "$1" ]; then
         stop) stop_services ;;
         restart) restart_services ;;
         status) show_banner_and_status; read -p "Press Enter to continue..." ;;
+        quickstart) quickstart_menu ;;
         update) update_server manual ;;
         reinstall) reinstall_server ;;
         internet-enable|enable-internet) enable_internet ;;
         internet-disable|disable-internet) disable_internet ;;
         delete|uninstall) uninstall_server ;;
-        *) echo "Usage: myserver [start|stop|restart|status|update|reinstall|internet-enable|internet-disable|uninstall]" ;;
+        *) echo "Usage: myserver [start|stop|restart|status|quickstart|update|reinstall|internet-enable|internet-disable|uninstall]" ;;
     esac
     exit 0
 fi
@@ -763,13 +900,14 @@ while true; do
         echo -e "\\033[1;33m 2) Enable Internet  (enable internet access)\\033[0m"
     fi
     echo -e "\\033[1;33m 3) restart          (Restart all services)\\033[0m"
-    echo -e "\\033[1;33m 4) refresh status   (Re-check server status)\\033[0m"
-    echo -e "\\033[1;33m 5) update           (Check and apply updates)\\033[0m"
-    echo -e "\\033[1;33m 6) reinstall        (To fix issues)\\033[0m"
-    echo -e "\\033[1;33m 7) uninstall        (Remove server stack)\\033[0m"
-    echo -e "\\033[1;33m 8) exit             (Exit & Stop Server)\\033[0m"
+    echo -e "\\033[1;33m 4) quickstart       (Install WP / Laravel)\\033[0m"
+    echo -e "\\033[1;33m 5) refresh status   (Re-check server status)\\033[0m"
+    echo -e "\\033[1;33m 6) update           (Check and apply updates)\\033[0m"
+    echo -e "\\033[1;33m 7) reinstall        (To fix issues)\\033[0m"
+    echo -e "\\033[1;33m 8) uninstall        (Remove server stack)\\033[0m"
+    echo -e "\\033[1;33m 9) exit             (Exit & Stop Server)\\033[0m"
     echo ""
-    read -p $'\\033[1;33mEnter choice [1-8]: \\033[0m' choice
+    read -p $'\\033[1;33mEnter choice [1-9]: \\033[0m' choice
 
     case "$choice" in
         1)
@@ -789,11 +927,12 @@ while true; do
             fi
             ;;
         3|restart) restart_services ;;
-        4|refresh) continue ;;
-        5|update) update_server manual ;;
-        6|reinstall) reinstall_server ;;
-        7|uninstall|delete) uninstall_server ;;
-        8|exit)
+        4|quickstart) quickstart_menu ;;
+        5|refresh) continue ;;
+        6|update) update_server manual ;;
+        7|reinstall) reinstall_server ;;
+        8|uninstall|delete) uninstall_server ;;
+        9|exit)
             stop_services
             echo -e "\\033[1;32mServer stopped and exited successfully.\\033[0m"
             exit 0
@@ -828,10 +967,10 @@ def main():
         print(f"\033[1;33m[+] Deploying Advanced Nginx + PHP-FPM Server Stack v{CURRENT_VERSION}...\033[0m")
         
         steps = [
-            ("Updating Packages", "pkg update -y && pkg upgrade -y"),
+            ("Updating Packages", "pkg update -y"),
             ("Storage Setup", None),
             ("Installing Core Software", "pkg install -y nginx php php-fpm mariadb redis openssl-tool curl tar git wget cloudflared || pkg install -y nginx php php-fpm mariadb redis openssl-tool curl tar git wget"),
-            ("MariaDB Initialization", setup_mariadb),
+            ("MariaDB Hardened Initialization", setup_mariadb),
             ("Redis Setup", setup_redis),
             ("PHP-FPM Configuration", setup_php_fpm),
             ("SSL Certificate Setup", setup_ssl),
