@@ -44,7 +44,7 @@ def setup_mariadb():
 
         if not (data_dir / "mysql").exists():
             run_cmd(f"mariadb-install-db --datadir='{data_dir}'")
-            print("\033[1;32m [✓] MariaDB database initialized. \033[0m")
+            print(r"\033[1;32m [✓] MariaDB database initialized. \033[0m")
 
         # Start MariaDB temporarily to apply security hardening
         if command_exists("mariadbd-safe"):
@@ -71,7 +71,7 @@ def setup_mariadb():
             FLUSH PRIVILEGES;
             """
             run_cmd(f"mysql -u root --socket='{sock_path}' -e \"{sec_sql}\"")
-            print("\033[1;32m [✓] MariaDB Security Hardening applied. \033[0m")
+            print(r"\033[1;32m [✓] MariaDB Security Hardening applied. \033[0m")
         
         # Stop temp instance
         run_cmd(f"mysqladmin --socket='{sock_path}' shutdown")
@@ -95,7 +95,7 @@ def setup_redis():
         redis_conf_content = f"dir {redis_data}\nport 6379\nbind 127.0.0.1\ndaemonize yes\nlogfile {log_dir}/redis.log\nignore-warnings ARM64-COW-BUG\n"
         redis_conf.write_text(redis_conf_content)
         
-        print("\033[1;32m [✓] Redis configured (ARM64 warning suppressed). \033[0m")
+        print(r"\033[1;32m [✓] Redis configured (ARM64 warning suppressed). \033[0m")
         return True
     except Exception as e:
         print(f"\033[1;31m [!] Redis init error: {e}\033[0m")
@@ -118,7 +118,7 @@ pm.min_spare_servers = 1
 pm.max_spare_servers = 3
 """
         www_conf.write_text(conf_content)
-        print("\033[1;32m [✓] PHP-FPM configured (Port 9000). \033[0m")
+        print(r"\033[1;32m [✓] PHP-FPM configured (Port 9000). \033[0m")
         return True
     except Exception as e:
         print(f"\033[1;31m [!] PHP-FPM config error: {e}\033[0m")
@@ -159,7 +159,7 @@ IP.1 = 127.0.0.1
 IP.2 = ::1
 """)
         run_cmd(f"openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout '{key_path}' -out '{cert_path}' -config '{openssl_cnf}'")
-        print("\033[1;32m [✓] Enhanced SSL Certificates generated. \033[0m")
+        print(r"\033[1;32m [✓] Enhanced SSL Certificates generated. \033[0m")
         return True
     except Exception as e:
         print(f"\033[1;31m [!] SSL generation error: {e}\033[0m")
@@ -230,7 +230,7 @@ http {{
 }}
 """
         conf_path.write_text(nginx_config)
-        print("\033[1;32m [✓] Nginx configured with PHP-FPM & SSL. \033[0m")
+        print(r"\033[1;32m [✓] Nginx configured with PHP-FPM & SSL. \033[0m")
         return True
     except Exception as e:
         print(f"\033[1;31m [!] Nginx config error: {e}\033[0m")
@@ -274,7 +274,7 @@ extension=bcmath
     try:
         php_ini_path.parent.mkdir(parents=True, exist_ok=True)
         php_ini_path.write_text(php_ini_content)
-        print("\033[1;32m [✓] php.ini updated & PHP Sessions initialized. \033[0m")
+        print(r"\033[1;32m [✓] php.ini updated & PHP Sessions initialized. \033[0m")
         return True
     except Exception as e:
         print(f"\033[1;31m [!] php.ini error: {e}\033[0m")
@@ -299,9 +299,9 @@ def install_phpmyadmin():
 
     try:
         if is_update:
-            print("\033[1;34m [*] Checking and updating phpMyAdmin to latest version... \033[0m")
+            print(r"\033[1;34m [*] Checking and updating phpMyAdmin to latest version... \033[0m")
         else:
-            print("\033[1;34m [*] Downloading and installing phpMyAdmin... \033[0m")
+            print(r"\033[1;34m [*] Downloading and installing phpMyAdmin... \033[0m")
 
         TMP_DIR.mkdir(parents=True, exist_ok=True)
         tar_file = TMP_DIR / "pma.tar.gz"
@@ -309,7 +309,7 @@ def install_phpmyadmin():
         
         run_cmd(f"curl -sL '{url}' -o '{tar_file}'")
         if not tar_file.exists() or tar_file.stat().st_size == 0:
-            print("\033[1;31m [!] Failed to download phpMyAdmin. \033[0m")
+            print(r"\033[1;31m [!] Failed to download phpMyAdmin. \033[0m")
             return False
 
         config_file = pma_dir / "config.inc.php"
@@ -343,9 +343,9 @@ def install_phpmyadmin():
         pma_tmp.mkdir(exist_ok=True)
 
         if is_update:
-            print("\033[1;32m [✓] phpMyAdmin updated to latest version successfully. \033[0m")
+            print(r"\033[1;32m [✓] phpMyAdmin updated to latest version successfully. \033[0m")
         else:
-            print("\033[1;32m [✓] phpMyAdmin installed with login configuration. \033[0m")
+            print(r"\033[1;32m [✓] phpMyAdmin installed with login configuration. \033[0m")
         return True
     except Exception as e:
         print(f"\033[1;31m [!] phpMyAdmin error: {e}\033[0m")
@@ -355,7 +355,7 @@ def create_myserver_cli():
     bin_path = PREFIX / "bin/myserver"
     VERSION_FILE.write_text(CURRENT_VERSION)
 
-    script_content = f"""#!/data/data/com.termux/files/usr/bin/bash
+    script_content = rf"""#!/data/data/com.termux/files/usr/bin/bash
 
 PREFIX="{PREFIX}"
 HTDOCS_DIR="{HTDOCS_DIR}"
@@ -398,14 +398,14 @@ has_internet() {{
 show_banner_and_status() {{
     clear
     echo -e "\033[1;36m"
-    echo "  __  __       _____                                "
-    echo " |  \/  |     / ____|                               "
-    echo " | \  / |0_ _| (___   ___  _ __ __   _____ _ __ "
-    echo " | |\/| | | | |\___ \ / _ \| '__|\ \ / / _ \ '__|"
-    echo " | |  | | |_| |____) |  __/| |    \ V /  __/ |   "
-    echo " |_|  |_|\__, |_____/ \___||_|     \_/ \___|_|   "
-    echo "          __/ |                                  "
-    echo "         |___/        Server Manager v{CURRENT_VERSION}  "
+    echo r"  __  __       _____                                "
+    echo r" |  \/  |     / ____|                               "
+    echo r" | \  / |0_ _| (___   ___  _ __ __   _____ _ __ "
+    echo r" | |\/| | | | |\___ \ / _ \| '__|\ \ / / _ \ '__|"
+    echo r" | |  | | |_| |____) |  __/| |    \ V /  __/ |   "
+    echo r" |_|  |_|\__, |_____/ \___||_|     \_/ \___|_|   "
+    echo r"          __/ |                                  "
+    echo r"         |___/        Server Manager v{CURRENT_VERSION}  "
     echo -e "\033[0m"
 
     echo -e "\033[1;33m============= [ DEVELOPER INFO ] ==============\033[0m"
@@ -985,7 +985,7 @@ done
     try:
         bin_path.write_text(script_content, encoding='utf-8')
         bin_path.chmod(0o755)
-        print("\033[1;32m [✓] CLI Tool 'myserver' configured. \033[0m")
+        print(r"\033[1;32m [✓] CLI Tool 'myserver' configured. \033[0m")
         return True
     except Exception as e:
         print(f"\033[1;31m [!] CLI creation error: {e}\033[0m")
@@ -996,10 +996,10 @@ def cleanup_repository():
         cwd = Path.cwd().resolve()
         if cwd not in [HOME, PREFIX, Path('/'), Path('/data/data/com.termux/files')]:
             if (cwd / "install_server.py").exists() or (cwd / ".git").exists():
-                print("\033[1;33m[*] Cleaning up downloaded repository folder...\033[0m")
+                print(r"\033[1;33m[*] Cleaning up downloaded repository folder...\033[0m")
                 os.chdir(HOME)
                 shutil.rmtree(cwd, ignore_errors=True)
-                print("\033[1;32m[✓] Downloaded repository folder deleted successfully.\033[0m")
+                print(r"\033[1;32m[✓] Downloaded repository folder deleted successfully.\033[0m")
     except Exception as e:
         print(f"\033[1;31m [!] Cleanup notice: {e}\033[0m")
 
@@ -1035,12 +1035,12 @@ def main():
             elif isinstance(action, str):
                 run_cmd(action)
 
-        print("\n\033[1;32m[✓] Server Stack Deployed Successfully!\033[0m")
+        print(r"\n\033[1;32m[✓] Server Stack Deployed Successfully!\033[0m")
         print(f"\033[1;36mWeb Root: {HTDOCS_DIR}\033[0m")
         print("HTTP URL:  http://localhost:8080")
         print("HTTPS URL: https://localhost:8443")
         print("phpMyAdmin: http://localhost:8080/phpmyadmin")
-        print("\n\033[1;35mType 'myserver' anytime to open the interactive manager.\033[0m\n")
+        print(r"\n\033[1;35mType 'myserver' anytime to open the interactive manager.\033[0m\n")
 
         cleanup_repository()
 
