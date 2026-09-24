@@ -355,7 +355,7 @@ def create_myserver_cli():
     bin_path = PREFIX / "bin/myserver"
     VERSION_FILE.write_text(CURRENT_VERSION)
 
-    script_content = rf"""#!/data/data/com.termux/files/usr/bin/bash
+    script_content = f"""#!/data/data/com.termux/files/usr/bin/bash
 
 PREFIX="{PREFIX}"
 HTDOCS_DIR="{HTDOCS_DIR}"
