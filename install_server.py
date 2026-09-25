@@ -8,16 +8,18 @@ import re
 import subprocess
 import secrets
 import string
+import getpass
 from pathlib import Path
 
 # Current Version & Release Notes
-CURRENT_VERSION = "2.16.2"
+CURRENT_VERSION = "2.17.0"
 CHANGELOG = [
-    "Fix: 'Access to the script ... has been denied' (403 on /, /phpmyadmin/)",
-    "Fix: Nginx config no longer relies on 'index' + 'try_files $uri/' on FUSE",
-    "New: Explicit 'location ~ ^(.*)/$' handler maps /dir/ to /dir/index.php",
-    "Improvement: imagick active in conf.d (already present since 2.16.1)",
-    "Fix: (carried) Deterministic PHP extension detection",
+    "New: Choose web root location (Termux home or Phone storage) via arrow-key menu",
+    "New: Optional MariaDB root password during installation (empty = none)",
+    "New: Dynamic interactive menu (hides Internet/restart when server stopped)",
+    "Fix: Removed 'fix-permissions' from menu (auto-fix still active on start)",
+    "Fix: (carried) Nginx FUSE-safe directory handling (no more Access denied)",
+    "Improvement: imagick active in conf.d (since 2.16.1)",
     "Security: (carried) PHP path traversal fix + phpMyAdmin AllowNoPassword OFF",
     "Fix: (carried) MariaDB stopped cleanly after installation",
 ]
@@ -25,7 +27,11 @@ CHANGELOG = [
 # System and Environment Paths
 PREFIX = Path(os.environ.get('PREFIX', '/data/data/com.termux/files/usr'))
 HOME = Path.home()
+
+# HTDOCS_DIR is resolved at install time (may be changed by user choice)
 HTDOCS_DIR = HOME / "storage/shared/htdocs"
+HTDOCS_PATH_FILE = PREFIX / "etc/myserver_htdocs_path"
+
 NGINX_DIR = PREFIX / "etc/nginx"
 PHP_FPM_DIR = PREFIX / "etc/php-fpm.d"
 PHP_CONFD_DIR = PREFIX / "etc/php/conf.d"
@@ -34,17 +40,19 @@ SSL_DIR = NGINX_DIR / "ssl"
 TMP_DIR = PREFIX / "tmp"
 VERSION_FILE = PREFIX / "etc/myserver_version"
 REPO_DIR = Path(__file__).resolve().parent
+MY_CNF_FILE = HOME / ".my.cnf"
 
 GITHUB_RAW_URL = "https://raw.githubusercontent.com/elias0esmail/termux-web-server/main"
+
+# Set at install time (empty = no root password)
+DB_ROOT_PASSWORD = ""
 
 # ---------------------------------------------------------------------------
 # PHP extension inventory
 # ---------------------------------------------------------------------------
 PHP_EXPECTED_EXTENSIONS = [
-    # Built-in to main php package:
     "mysqli", "pdo_mysql", "mbstring", "openssl",
     "curl", "zip", "xml", "intl", "bcmath",
-    # External (registered via conf.d):
     "gd", "sodium", "redis", "apcu", "imagick",
 ]
 
@@ -77,6 +85,133 @@ def is_process_running(pattern: str) -> bool:
     return r.returncode == 0
 
 
+# ---------------------------------------------------------------------------
+# Interactive arrow-key menu
+# ---------------------------------------------------------------------------
+def choose_option(title: str, options: list, default: int = 0) -> int:
+    """
+    Interactive menu with ↑/↓ + Enter. Falls back to numeric input if not a TTY.
+    """
+    if not sys.stdin.isatty():
+        print(f"\033[1;36m{title}\033[0m")
+        for i, opt in enumerate(options, 1):
+            print(f"  {i}) {opt}")
+        try:
+            raw = input(f"\033[1;33mSelect [1-{len(options)}]: \033[0m").strip()
+            n = int(raw) if raw else default + 1
+            return max(0, min(len(options) - 1, n - 1))
+        except Exception:
+            return default
+
+    import tty
+    import termios
+
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    idx = default
+    lines_printed = 0
+
+    sys.stdout.write("\033[?25l")  # hide cursor
+    sys.stdout.flush()
+
+    try:
+        tty.setcbreak(fd)
+        while True:
+            if lines_printed > 0:
+                sys.stdout.write(f"\033[{lines_printed}A")
+            sys.stdout.write("\033[J")  # clear below
+
+            lines = [f"\033[1;36m{title}\033[0m"]
+            for i, opt in enumerate(options):
+                if i == idx:
+                    lines.append(f"  \033[1;32m❯ {opt}\033[0m")
+                else:
+                    lines.append(f"    {opt}")
+            lines.append("\033[1;33m  (↑/↓ to move, Enter to select)\033[0m")
+
+            for line in lines:
+                sys.stdout.write(line + "\n")
+            sys.stdout.flush()
+            lines_printed = len(lines)
+
+            ch = sys.stdin.read(1)
+            if ch == '\x1b':
+                ch2 = sys.stdin.read(1)
+                if ch2 == '[':
+                    ch3 = sys.stdin.read(1)
+                    if ch3 == 'A':
+                        idx = (idx - 1) % len(options)
+                    elif ch3 == 'B':
+                        idx = (idx + 1) % len(options)
+            elif ch in ('\r', '\n'):
+                break
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        sys.stdout.write("\033[?25h\n")
+        sys.stdout.flush()
+
+    return idx
+
+
+def ask_web_root_location() -> Path:
+    """Prompt user to choose the web root directory."""
+    home_path = HOME / "htdocs"
+    storage_path = HOME / "storage/shared/htdocs"
+
+    idx = choose_option(
+        "Where should the web root (htdocs) be created?",
+        [
+            f"Termux home    → {home_path}",
+            f"Phone storage  → {storage_path}  (visible in Files app)",
+        ],
+        default=0,
+    )
+    return home_path if idx == 0 else storage_path
+
+
+def ask_db_password() -> str:
+    """Prompt user for MariaDB root password. Empty = no password."""
+    print("\033[1;36m[i] MariaDB root password\033[0m")
+    print("\033[1;33m    Leave empty and press Enter for NO password (default)\033[0m")
+    try:
+        pw = getpass.getpass("\033[1;33m  Password: \033[0m").strip()
+    except Exception:
+        pw = ""
+    if not pw:
+        return ""
+    try:
+        confirm = getpass.getpass("\033[1;33m  Confirm : \033[0m").strip()
+    except Exception:
+        confirm = pw
+    if pw != confirm:
+        print("\033[1;31m [!] Passwords do not match. Using NO password.\033[0m")
+        return ""
+    return pw
+
+
+# ---------------------------------------------------------------------------
+# .my.cnf helpers (used by CLI to authenticate without prompting)
+# ---------------------------------------------------------------------------
+def _sql_escape(s: str) -> str:
+    return s.replace("\\", "\\\\").replace("'", "\\'")
+
+
+def write_my_cnf(password: str, sock_path: Path):
+    """Write ~/.my.cnf so mysql/mysqladmin authenticate automatically."""
+    lines = ["[client]", "user = root"]
+    if password:
+        lines.append(f'password = "{password}"')
+    lines.append(f"socket = {sock_path}")
+    MY_CNF_FILE.write_text("\n".join(lines) + "\n")
+    try:
+        os.chmod(MY_CNF_FILE, 0o600)
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# PHP introspection
+# ---------------------------------------------------------------------------
 def get_php_ini_path() -> Path:
     try:
         result = subprocess.run(["php", "--ini"], capture_output=True, text=True)
@@ -97,13 +232,6 @@ def get_php_ini_path() -> Path:
     return PREFIX / "etc/php/php.ini"
 
 
-def get_php_confd_dir() -> Path:
-    return PHP_CONFD_DIR
-
-
-# ---------------------------------------------------------------------------
-# PHP introspection
-# ---------------------------------------------------------------------------
 def php_loaded_extensions() -> set:
     try:
         r = subprocess.run(["php", "-m"], capture_output=True,
@@ -157,26 +285,6 @@ def scan_available_so(ext_dir: Path) -> set:
     except Exception:
         pass
     return found
-
-
-def php_ext_so_exists(name: str, ext_dir: Path = None) -> bool:
-    if ext_dir is None:
-        ext_dir = php_extension_dir()
-    if not ext_dir.exists():
-        return False
-    return (ext_dir / f"{name}.so").exists()
-
-
-def php_ext_loaded(name: str) -> bool:
-    return name.lower() in php_loaded_extensions()
-
-
-def php_ext_installed(name: str) -> bool:
-    if php_ext_loaded(name):
-        return True
-    if php_ext_so_exists(name):
-        return True
-    return False
 
 
 def clean_php_ini_legacy(ini_path: Path) -> int:
@@ -297,16 +405,8 @@ def print_htdocs_diagnostic():
         try:
             st = HTDOCS_DIR.stat()
             print(f"\033[1;36m     mode      : {oct(st.st_mode & 0o777)} \033[0m")
-            print(f"\033[1;36m     uid/gid   : {st.st_uid}/{st.st_gid} \033[0m")
         except Exception:
             pass
-        idx = HTDOCS_DIR / "index.php"
-        if idx.exists():
-            try:
-                st = idx.stat()
-                print(f"\033[1;36m     index.php : {oct(st.st_mode & 0o777)} \033[0m")
-            except Exception:
-                pass
 
 
 # ---------------------------------------------------------------------------
@@ -351,6 +451,35 @@ def setup_mariadb():
             run_cmd(f"mysql -u root --socket='{sock_path}' -e \"{sec_sql}\"")
             print("\033[1;32m [✓] MariaDB Security Hardening applied. \033[0m")
 
+        # Write ~/.my.cnf with the current (empty) password so we can
+        # authenticate while we change it.
+        write_my_cnf("", sock_path)
+
+        # Apply the user-chosen password (if any)
+        if DB_ROOT_PASSWORD:
+            tmp_sql = TMP_DIR / "myserver_setpw.sql"
+            TMP_DIR.mkdir(parents=True, exist_ok=True)
+            escaped = _sql_escape(DB_ROOT_PASSWORD)
+            tmp_sql.write_text(
+                f"ALTER USER 'root'@'localhost' IDENTIFIED BY '{escaped}';\n"
+                f"FLUSH PRIVILEGES;\n"
+            )
+            run_cmd(f"mysql --socket='{sock_path}' < '{tmp_sql}'")
+            try:
+                tmp_sql.unlink()
+            except Exception:
+                pass
+            write_my_cnf(DB_ROOT_PASSWORD, sock_path)
+            print("\033[1;32m [✓] MariaDB root password set. \033[0m")
+        else:
+            # Explicitly remove any previously-set password
+            run_cmd(
+                f"mysql --socket='{sock_path}' -e "
+                f"\"ALTER USER 'root'@'localhost' IDENTIFIED BY ''; FLUSH PRIVILEGES;\""
+            )
+            print("\033[1;36m [i] MariaDB root has no password. \033[0m")
+
+        # Graceful shutdown (uses ~/.my.cnf)
         run_cmd(f"mysqladmin --socket='{sock_path}' shutdown")
         time.sleep(2)
 
@@ -486,7 +615,7 @@ IP.2 = ::1
 
 
 # ---------------------------------------------------------------------------
-# Nginx  (v2.16.2 — explicit directory handling, no reliance on 'index')
+# Nginx (FUSE-safe)
 # ---------------------------------------------------------------------------
 def setup_nginx():
     try:
@@ -494,14 +623,7 @@ def setup_nginx():
         cert_path = SSL_DIR / "server.crt"
         key_path = SSL_DIR / "server.key"
 
-        # Common location blocks used by both HTTP and HTTPS servers.
-        # NOTE: We do NOT use `try_files $uri $uri/ ...` because on Termux's
-        # FUSE-mounted htdocs, nginx's directory stat can fail and end up
-        # passing the bare directory path to PHP-FPM. This triggers:
-        #   "Access to the script '.../htdocs' has been denied"
-        # Instead we explicitly rewrite any trailing-slash URI to $1/index.php.
         common_locations = f"""\
-        # 1) phpMyAdmin PHP files (rate-limited)
         location ~ ^/phpmyadmin/.*\\.php$ {{
             limit_req zone=pma_zone burst=5 nodelay;
             try_files $uri =404;
@@ -511,7 +633,6 @@ def setup_nginx():
             fastcgi_read_timeout 300;
         }}
 
-        # 2) Any URI ending in "/" → serve "$1/index.php" via FastCGI
         location ~ ^(.*)/$ {{
             try_files $1/index.php =404;
             include fastcgi_params;
@@ -521,7 +642,6 @@ def setup_nginx():
             fastcgi_read_timeout 300;
         }}
 
-        # 3) Any .php file
         location ~ \\.php$ {{
             try_files $uri =404;
             include fastcgi_params;
@@ -530,12 +650,10 @@ def setup_nginx():
             fastcgi_read_timeout 300;
         }}
 
-        # 4) Everything else: static files, then WordPress/Laravel/Nextcloud fallback
         location / {{
             try_files $uri /index.php?$args;
         }}
 
-        # 5) Block hidden files
         location ~ /\\. {{
             deny all;
         }}
@@ -633,8 +751,6 @@ def create_php_ini():
     available_so = scan_available_so(ext_dir)
     if available_so:
         print(f"\033[1;36m [i] Available .so files: {', '.join(sorted(available_so))} \033[0m")
-    else:
-        print(f"\033[1;33m [i] No .so files found in {ext_dir} \033[0m")
 
     loaded_before = php_loaded_extensions()
 
@@ -649,12 +765,11 @@ date.timezone = UTC
 
 ; --- Extensions ---
 extension_dir = "{ext_dir}"
-; NOTE: Do NOT add `extension=` lines here. conf.d/*.ini handles them.
 
-; Security: prevent path traversal in FPM
+; Security
 cgi.fix_pathinfo=0
 
-; Session settings
+; Sessions
 session.save_handler = files
 session.save_path = "{TMP_DIR}"
 session.use_cookies = 1
@@ -722,16 +837,6 @@ session.gc_maxlifetime = 1440
         print(f"\033[1;33m     To install: pkg install {' '.join(missing_pkgs)} \033[0m")
     else:
         print("\033[1;32m [✓] All available PHP extension packages are installed. \033[0m")
-
-    installed_pkgs = list_installed_php_packages()
-    if installed_pkgs:
-        print(f"\033[1;36m [i] Termux php-* packages installed: "
-              f"{', '.join(sorted(installed_pkgs))} \033[0m")
-
-        for ext, pkg in sorted(PHP_EXT_PACKAGES.items()):
-            if pkg in installed_pkgs and ext not in available_so and ext not in loaded_before:
-                print(f"\033[1;33m [!] {pkg} is installed but {ext}.so was not "
-                      f"found in {ext_dir} \033[0m")
 
     return True
 
@@ -806,13 +911,15 @@ def install_phpmyadmin():
                 f"$cfg['blowfish_secret'] = '{secret}';",
                 content,
             )
+            # If DB has no password, allow no-password login (dev mode).
+            allow_nopass = "true" if not DB_ROOT_PASSWORD else "false"
             content = re.sub(
-                r"\$cfg\['Servers'\]\[\$i\]\['AllowNoPassword'\]\s*=\s*true;",
-                "$cfg['Servers'][$i]['AllowNoPassword'] = false;",
+                r"\$cfg\['Servers'\]\[\$i\]\['AllowNoPassword'\]\s*=\s*(true|false);",
+                f"$cfg['Servers'][$i]['AllowNoPassword'] = {allow_nopass};",
                 content,
             )
             if "AllowNoPassword" not in content:
-                content += "\n$cfg['Servers'][$i]['AllowNoPassword'] = false;\n"
+                content += f"\n$cfg['Servers'][$i]['AllowNoPassword'] = {allow_nopass};\n"
 
             content = re.sub(
                 r"\$cfg\['Servers'\]\[\$i\]\['host'\]\s*=\s*'localhost';",
@@ -834,7 +941,7 @@ def install_phpmyadmin():
         if is_update:
             print("\033[1;32m [✓] phpMyAdmin updated successfully. \033[0m")
         else:
-            print("\033[1;32m [✓] phpMyAdmin installed (AllowNoPassword=OFF). \033[0m")
+            print("\033[1;32m [✓] phpMyAdmin installed. \033[0m")
         return True
     except Exception as e:
         print(f"\033[1;31m [!] phpMyAdmin error: {e}\033[0m")
@@ -842,7 +949,7 @@ def install_phpmyadmin():
 
 
 # ---------------------------------------------------------------------------
-# myserver CLI
+# myserver CLI (bash)
 # ---------------------------------------------------------------------------
 def create_myserver_cli():
     bin_path = PREFIX / "bin/myserver"
@@ -918,33 +1025,12 @@ check_webroot() {{
         return 1
     fi
     if [ ! -r "$HTDOCS_DIR" ] || [ ! -x "$HTDOCS_DIR" ]; then
-        echo -e "\033[1;31m[!] Web root not readable/traversable: $HTDOCS_DIR\033[0m"
-        echo -e "\033[1;33m[*] Running auto-fix...\033[0m"
-        fix_permissions_silent
-        return 0
+        echo -e "\033[1;33m[*] Auto-fixing web root permissions...\033[0m"
+        chmod 755 "$HTDOCS_DIR" 2>/dev/null
+        find "$HTDOCS_DIR" -type d -exec chmod 755 {{}} \; 2>/dev/null
+        find "$HTDOCS_DIR" -type f -exec chmod 644 {{}} \; 2>/dev/null
     fi
     return 0
-}}
-
-fix_permissions_silent() {{
-    [ -d "$HTDOCS_DIR" ] || return 0
-    chmod 755 "$HTDOCS_DIR" 2>/dev/null
-    find "$HTDOCS_DIR" -type d -exec chmod 755 {{}} \; 2>/dev/null
-    find "$HTDOCS_DIR" -type f -exec chmod 644 {{}} \; 2>/dev/null
-}}
-
-fix_permissions() {{
-    echo -e "\033[1;34m[*] Fixing htdocs permissions...\033[0m"
-    if [ ! -d "$HTDOCS_DIR" ]; then
-        echo -e "\033[1;31m[!] Web root does not exist: $HTDOCS_DIR\033[0m"
-        read -p "Press Enter to continue..."
-        return
-    fi
-    fix_permissions_silent
-    echo -e "\033[1;32m[OK] Permissions fixed (dirs 755, files 644).\033[0m"
-    echo -e "\033[1;36m[i] Web root: $HTDOCS_DIR\033[0m"
-    ls -ld "$HTDOCS_DIR"
-    read -p "Press Enter to continue..."
 }}
 
 show_banner_and_status() {{
@@ -1056,14 +1142,6 @@ start_services() {{
 
     sleep 1.5
     echo -e "\033[1;32m[OK] Services started successfully.\033[0m"
-
-    echo -e "\033[1;33m[*] Launching HTTPS URL in browser...\033[0m"
-    if command -v termux-open &> /dev/null; then
-        termux-open https://localhost:8443
-    elif command -v xdg-open &> /dev/null; then
-        xdg-open https://localhost:8443
-    fi
-    sleep 1.5
 }}
 
 stop_services() {{
@@ -1209,13 +1287,15 @@ install_wordpress() {{
 
     if pgrep -f "mariadb|mysqld" > /dev/null && [ -S "$MARIADB_SOCKET" ]; then
         echo -e "\033[1;34m[*] Creating MariaDB database 'wordpress'...\033[0m"
-        mysql -u root --socket="$MARIADB_SOCKET" -e "CREATE DATABASE IF NOT EXISTS wordpress DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" 2>/dev/null
+        mysql --socket="$MARIADB_SOCKET" -e "CREATE DATABASE IF NOT EXISTS wordpress DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" 2>/dev/null
     fi
 
-    fix_permissions_silent
+    chmod 755 "$HTDOCS_DIR" 2>/dev/null
+    find "$HTDOCS_DIR" -type d -exec chmod 755 {{}} \; 2>/dev/null
+    find "$HTDOCS_DIR" -type f -exec chmod 644 {{}} \; 2>/dev/null
+
     echo -e "\033[1;32m[✓] WordPress installed!\033[0m"
     echo -e " URL      : \033[1;34mhttp://localhost:8080/wordpress\033[0m"
-    echo -e " Database : \033[1;33mwordpress\033[0m (User: root, Pass: [empty])"
     echo ""
     read -p "Press Enter to continue..."
 }}
@@ -1242,13 +1322,15 @@ install_laravel() {{
 
     DB_NAME=$(echo "$PROJECT_NAME" | tr '-' '_')
     if pgrep -f "mariadb|mysqld" > /dev/null && [ -S "$MARIADB_SOCKET" ]; then
-        mysql -u root --socket="$MARIADB_SOCKET" -e "CREATE DATABASE IF NOT EXISTS \`$DB_NAME\` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" 2>/dev/null
+        mysql --socket="$MARIADB_SOCKET" -e "CREATE DATABASE IF NOT EXISTS \`$DB_NAME\` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" 2>/dev/null
     fi
 
-    fix_permissions_silent
+    chmod 755 "$HTDOCS_DIR" 2>/dev/null
+    find "$HTDOCS_DIR" -type d -exec chmod 755 {{}} \; 2>/dev/null
+    find "$HTDOCS_DIR" -type f -exec chmod 644 {{}} \; 2>/dev/null
+
     echo -e "\033[1;32m[✓] Laravel installed!\033[0m"
     echo -e " URL      : \033[1;34mhttp://localhost:8080/$PROJECT_NAME/public\033[0m"
-    echo -e " Database : \033[1;33m$DB_NAME\033[0m"
     echo ""
     read -p "Press Enter to continue..."
 }}
@@ -1282,7 +1364,7 @@ install_nextcloud() {{
 
     if pgrep -f "mariadb|mysqld" > /dev/null && [ -S "$MARIADB_SOCKET" ]; then
         echo -e "\033[1;34m[*] Creating dedicated MariaDB user + database...\033[0m"
-        mysql -u root --socket="$MARIADB_SOCKET" <<SQL 2>/dev/null
+        mysql --socket="$MARIADB_SOCKET" <<SQL 2>/dev/null
 CREATE DATABASE IF NOT EXISTS nextcloud DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE USER IF NOT EXISTS '$NC_DB_USER'@'127.0.0.1' IDENTIFIED BY '$NC_DB_PASS';
 CREATE USER IF NOT EXISTS '$NC_DB_USER'@'localhost' IDENTIFIED BY '$NC_DB_PASS';
@@ -1292,20 +1374,20 @@ FLUSH PRIVILEGES;
 SQL
     fi
 
-    fix_permissions_silent
+    chmod 755 "$HTDOCS_DIR" 2>/dev/null
+    find "$HTDOCS_DIR" -type d -exec chmod 755 {{}} \; 2>/dev/null
+    find "$HTDOCS_DIR" -type f -exec chmod 644 {{}} \; 2>/dev/null
+
     echo -e "\033[1;32m[✓] Nextcloud installed!\033[0m"
     echo -e " URL      : \033[1;34mhttp://localhost:8080/nextcloud\033[0m"
-    echo -e " Database : \033[1;33mnextcloud\033[0m"
     echo -e " DB User  : \033[1;33m$NC_DB_USER\033[0m"
     echo -e " DB Pass  : \033[1;33m$NC_DB_PASS\033[0m  \033[1;31m(save this!)\033[0m"
-    echo -e " DB Host  : \033[1;33m127.0.0.1\033[0m"
     echo ""
     read -p "Press Enter to continue..."
 }}
 
 update_server() {{
     MODE="$1"
-
     [ "$MODE" != "auto" ] && echo -e "\033[1;36m[*] Checking for updates...\033[0m"
 
     LOCAL_VER=$(cat "$VERSION_FILE" 2>/dev/null || echo "{CURRENT_VERSION}")
@@ -1317,7 +1399,6 @@ update_server() {{
     if [ ! -s "$TMP_UPD" ]; then
         rm -f "$TMP_UPD"
         if [ "$MODE" = "auto" ]; then
-            echo -e "\033[1;33m[INFO] No internet or update server unreachable.\033[0m"
             sleep 1.2
             return
         fi
@@ -1363,7 +1444,6 @@ PYEOF
                 MYSERVER_SKIP_AUTOUPDATE=1 python3 "$TMP_UPD"
                 rm -f "$TMP_UPD"
                 echo -e "\n\033[1;32m[OK] Updated to $REMOTE_VER!\033[0m"
-                echo -e "\033[1;36m[*] Press Enter to restart myserver...\033[0m"
                 read -r
                 export MYSERVER_SKIP_AUTOUPDATE=1
                 exec "$PREFIX/bin/myserver"
@@ -1416,7 +1496,6 @@ reinstall_server() {{
             rm -f "$TMP_UPD"
 
             echo -e "\n\033[1;32m[OK] Reinstall completed!\033[0m"
-            echo -e "\033[1;36m[*] Press Enter to relaunch...\033[0m"
             read -r
             export MYSERVER_SKIP_AUTOUPDATE=1
             exec "$PREFIX/bin/myserver"
@@ -1442,6 +1521,8 @@ uninstall_server() {{
             rm -f "$PREFIX/etc/php-fpm.d/www.conf"
             rm -f "$VERSION_FILE"
             rm -f "$TUNNEL_PID_FILE" "$TUNNEL_URL_FILE" "$TUNNEL_LOG"
+            rm -f "$PREFIX/etc/myserver_htdocs_path"
+            rm -f "$HOME/.my.cnf"
 
             for ext in gd sodium redis apcu imagick mysqli pdo_mysql mbstring openssl curl zip xml intl bcmath; do
                 rm -f "$PHP_CONFD_DIR/$ext.ini"
@@ -1469,6 +1550,7 @@ uninstall_server() {{
     esac
 }}
 
+# --- Subcommand mode (non-interactive) ---
 if [ -n "$1" ]; then
     case "$1" in
         start) start_services ;;
@@ -1480,13 +1562,13 @@ if [ -n "$1" ]; then
         reinstall) reinstall_server ;;
         internet-enable|enable-internet) enable_internet ;;
         internet-disable|disable-internet) disable_internet ;;
-        fixperms|fix-permissions) fix_permissions ;;
         delete|uninstall) uninstall_server ;;
-        *) echo "Usage: myserver [start|stop|restart|status|quickstart|update|reinstall|internet-enable|internet-disable|fixperms|uninstall]" ;;
+        *) echo "Usage: myserver [start|stop|restart|status|quickstart|update|reinstall|internet-enable|internet-disable|uninstall]" ;;
     esac
     exit 0
 fi
 
+# --- Interactive mode ---
 if [ -z "$MYSERVER_SKIP_AUTOUPDATE" ]; then
     echo -e "\033[1;36m[*] Checking for updates...\033[0m"
     sleep 0.6
@@ -1502,59 +1584,74 @@ while true; do
         SERVER_RUNNING=0
     fi
 
-    echo -e "\033[1;33mSelect an option:\033[0m"
     if [ "$SERVER_RUNNING" -eq 1 ]; then
+        # ====== RUNNING MENU ======
+        echo -e "\033[1;33mSelect an option:\033[0m"
         echo -e "\033[1;33m 1) stop             (Stop all services)\033[0m"
-    else
-        echo -e "\033[1;33m 1) start            (Start all services)\033[0m"
-    fi
-    if is_tunnel_running; then
-        echo -e "\033[1;33m 2) Disable Internet (disable internet access)\033[0m"
-    else
-        echo -e "\033[1;33m 2) Enable Internet  (enable internet access)\033[0m"
-    fi
-    echo -e "\033[1;33m 3) restart          (Restart all services)\033[0m"
-    echo -e "\033[1;33m 4) quickstart       (Install WP / Laravel / Nextcloud)\033[0m"
-    echo -e "\033[1;33m 5) refresh status   (Re-check server status)\033[0m"
-    echo -e "\033[1;33m 6) update           (Check and apply updates)\033[0m"
-    echo -e "\033[1;33m 7) reinstall        (To fix issues)\033[0m"
-    echo -e "\033[1;33m 8) uninstall        (Remove server stack)\033[0m"
-    echo -e "\033[1;33m 9) fix-permissions  (Fix Access Denied / 403 errors)\033[0m"
-    echo -e "\033[1;33m 0) exit             (Exit & Stop Server)\033[0m"
-    echo ""
-    read -p $'\033[1;33mEnter choice [0-9]: \033[0m' choice
+        if is_tunnel_running; then
+            echo -e "\033[1;33m 2) Disable Internet (disable internet access)\033[0m"
+        else
+            echo -e "\033[1;33m 2) Enable Internet  (enable internet access)\033[0m"
+        fi
+        echo -e "\033[1;33m 3) restart          (Restart all services)\033[0m"
+        echo -e "\033[1;33m 4) quickstart       (Install WP / Laravel / Nextcloud)\033[0m"
+        echo -e "\033[1;33m 5) refresh status   (Re-check server status)\033[0m"
+        echo -e "\033[1;33m 6) update           (Check and apply updates)\033[0m"
+        echo -e "\033[1;33m 7) reinstall        (To fix issues)\033[0m"
+        echo -e "\033[1;33m 8) uninstall        (Remove server stack)\033[0m"
+        echo -e "\033[1;33m 9) exit             (Exit & Stop Server)\033[0m"
+        echo ""
+        read -p $'\033[1;33mEnter choice [1-9]: \033[0m' choice
 
-    case "$choice" in
-        1)
-            if [ "$SERVER_RUNNING" -eq 1 ]; then
+        case "$choice" in
+            1|stop) stop_services ;;
+            2)
+                if is_tunnel_running; then
+                    disable_internet
+                else
+                    enable_internet
+                fi
+                ;;
+            3|restart) restart_services ;;
+            4|quickstart) quickstart_menu ;;
+            5|refresh) continue ;;
+            6|update) update_server manual ;;
+            7|reinstall) reinstall_server ;;
+            8|uninstall|delete) uninstall_server ;;
+            9|exit)
                 stop_services
-            else
-                start_services
-            fi
-            ;;
-        start) start_services ;;
-        stop) stop_services ;;
-        2)
-            if is_tunnel_running; then
-                disable_internet
-            else
-                enable_internet
-            fi
-            ;;
-        3|restart) restart_services ;;
-        4|quickstart) quickstart_menu ;;
-        5|refresh) continue ;;
-        6|update) update_server manual ;;
-        7|reinstall) reinstall_server ;;
-        8|uninstall|delete) uninstall_server ;;
-        9|fixperms|fix-permissions) fix_permissions ;;
-        0|exit)
-            stop_services
-            echo -e "\033[1;32mServer stopped and exited successfully.\033[0m"
-            exit 0
-            ;;
-        *) echo -e "\033[1;31mInvalid choice!\033[0m"; sleep 1 ;;
-    esac
+                echo -e "\033[1;32mServer stopped and exited successfully.\033[0m"
+                exit 0
+                ;;
+            *) echo -e "\033[1;31mInvalid choice!\033[0m"; sleep 1 ;;
+        esac
+    else
+        # ====== STOPPED MENU ======
+        echo -e "\033[1;33mSelect an option:\033[0m"
+        echo -e "\033[1;33m 1) start            (Start all services)\033[0m"
+        echo -e "\033[1;33m 2) quickstart       (Install WP / Laravel / Nextcloud)\033[0m"
+        echo -e "\033[1;33m 3) refresh status   (Re-check server status)\033[0m"
+        echo -e "\033[1;33m 4) update           (Check and apply updates)\033[0m"
+        echo -e "\033[1;33m 5) reinstall        (To fix issues)\033[0m"
+        echo -e "\033[1;33m 6) uninstall        (Remove server stack)\033[0m"
+        echo -e "\033[1;33m 7) exit\033[0m"
+        echo ""
+        read -p $'\033[1;33mEnter choice [1-7]: \033[0m' choice
+
+        case "$choice" in
+            1|start) start_services ;;
+            2|quickstart) quickstart_menu ;;
+            3|refresh) continue ;;
+            4|update) update_server manual ;;
+            5|reinstall) reinstall_server ;;
+            6|uninstall|delete) uninstall_server ;;
+            7|exit)
+                echo -e "\033[1;32mBye!\033[0m"
+                exit 0
+                ;;
+            *) echo -e "\033[1;31mInvalid choice!\033[0m"; sleep 1 ;;
+        esac
+    fi
 done
 """
     try:
@@ -1603,9 +1700,42 @@ def cleanup_repository():
 # Main
 # ---------------------------------------------------------------------------
 def main():
+    global HTDOCS_DIR, DB_ROOT_PASSWORD
+
     try:
         print(f"\033[1;33m[+] Deploying Advanced Nginx + PHP-FPM Server Stack v{CURRENT_VERSION}...\033[0m")
 
+        # --- Resolve web root (with arrow-key chooser) ---
+        saved_path = None
+        if HTDOCS_PATH_FILE.exists():
+            try:
+                saved_path = HTDOCS_PATH_FILE.read_text().strip()
+            except Exception:
+                saved_path = None
+
+        if saved_path:
+            HTDOCS_DIR = Path(saved_path)
+            print(f"\033[1;36m [i] Using saved web root: {HTDOCS_DIR} \033[0m")
+            print(f"\033[1;33m     (Delete {HTDOCS_PATH_FILE} to change it) \033[0m")
+        else:
+            HTDOCS_DIR = ask_web_root_location()
+            try:
+                HTDOCS_PATH_FILE.parent.mkdir(parents=True, exist_ok=True)
+                HTDOCS_PATH_FILE.write_text(str(HTDOCS_DIR))
+            except Exception:
+                pass
+            print(f"\033[1;32m [✓] Web root set to: {HTDOCS_DIR} \033[0m")
+
+        # --- Ask DB password ---
+        print()
+        DB_ROOT_PASSWORD = ask_db_password()
+        if DB_ROOT_PASSWORD:
+            print("\033[1;32m [✓] MariaDB root password will be set. \033[0m")
+        else:
+            print("\033[1;33m [i] MariaDB root will have NO password. \033[0m")
+        print()
+
+        # --- Pre-flight: clean legacy extension= lines ---
         ini_path = get_php_ini_path()
         if ini_path.exists():
             removed = clean_php_ini_legacy(ini_path)
@@ -1638,7 +1768,7 @@ def main():
             print(f"\033[1;34m[{i}/{len(steps)}] {desc}...\033[0m")
 
             if desc == "Storage Setup":
-                if not (HOME / "storage").exists():
+                if not (HOME / "storage").exists() and "storage" in str(HTDOCS_DIR):
                     subprocess.run("termux-setup-storage", shell=True)
                     time.sleep(3)
             elif callable(action):
@@ -1651,27 +1781,24 @@ def main():
 
         print_htdocs_diagnostic()
         if not verify_htdocs_readable():
-            print("\033[1;33m [!] Web root readability check FAILED. Nginx may return 403. \033[0m")
-            print("\033[1;33m     Try: myserver fixperms \033[0m")
+            print("\033[1;33m [!] Web root readability check FAILED. \033[0m")
         else:
             print("\033[1;32m [✓] Web root is readable by all users. \033[0m")
 
-        missing = [c for c in ["nginx", "php", "php-fpm", "mysqld", "redis-server"]
-                   if not command_exists(c)]
-        if missing:
-            print(f"\033[1;33m [!] Warning: missing binaries: {', '.join(missing)}\033[0m")
-
         if is_process_running("mariadbd") or is_process_running("mysqld"):
-            print("\033[1;33m [!] Notice: MariaDB left running after install — "
-                  "run 'myserver stop' to halt it.\033[0m")
+            print("\033[1;33m [!] Notice: MariaDB left running after install. \033[0m")
         else:
-            print("\033[1;32m [✓] MariaDB is stopped (ready for 'myserver start').\033[0m")
+            print("\033[1;32m [✓] MariaDB is stopped (ready for 'myserver start'). \033[0m")
 
         print("\n\033[1;32m[✓] Server Stack Deployed Successfully!\033[0m")
         print(f"\033[1;36mWeb Root: {HTDOCS_DIR}\033[0m")
         print("HTTP URL:  http://localhost:8080")
         print("HTTPS URL: https://localhost:8443")
         print("phpMyAdmin: http://localhost:8080/phpmyadmin")
+        if DB_ROOT_PASSWORD:
+            print("\033[1;36mDB Login:  root / (your chosen password)\033[0m")
+        else:
+            print("\033[1;36mDB Login:  root / (empty)\033[0m")
         print("\n\033[1;35mType 'myserver' anytime to open the interactive manager.\033[0m\n")
 
         cleanup_repository()
