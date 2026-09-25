@@ -10,15 +10,14 @@ import secrets
 import getpass
 from pathlib import Path
 
-CURRENT_VERSION = "2.19.1"
+CURRENT_VERSION = "2.19.2"
 CHANGELOG = [
-    "Fix: 'start_mariadb_background: command not found' during uninstall",
-    "Fix: 'stop_mariadb_cleanly: command not found' during uninstall",
-    "Fix: Added bash equivalents of MariaDB lifecycle helpers in CLI",
+    "Fix: fzf menu rendering — ASCII pointer, no separator, header-first",
+    "Fix: Colors reset before invoking fzf (no more stray escape sequences)",
+    "Fix: (carried) 'command not found' during uninstall",
     "Improvement: (carried) Full wipe on uninstall, preserve on reinstall",
-    "Fix: (carried) mariadb client (no more deprecation warnings)",
+    "Fix: (carried) mariadb client (no deprecation warnings)",
     "Fix: (carried) phpMyAdmin storage import uses --force",
-    "Fix: (carried) fzf menu, Nginx FUSE-safe, phpMyAdmin 503",
 ]
 
 PREFIX = Path(os.environ.get('PREFIX', '/data/data/com.termux/files/usr'))
@@ -99,23 +98,65 @@ def ensure_fzf() -> bool:
 
 
 def choose_option(title: str, options: list, default: int = 0) -> int:
+    """
+    Robust arrow-key menu using fzf with minimal chrome.
+
+    - ASCII pointer (>) for maximum font compatibility in Termux
+    - No separator, no scrollbar, no info line
+    - Header shown first (above the list)
+    """
     if not options:
         return 0
     if len(options) == 1:
         return 0
-    if ensure_fzf():
-        lines = [f"{i}\t{opt}" for i, opt in enumerate(options)]
-        reordered = [lines[default]] + [l for i, l in enumerate(lines) if i != default]
-        input_text = "\n".join(reordered) + "\n"
+
+    if not ensure_fzf():
+        # Fallback: numeric input
+        print(f"\033[1;36m{title}\033[0m")
+        for i, opt in enumerate(options, 1):
+            print(f"  {i}) {opt}")
         try:
-            result = subprocess.run(
-                ["fzf", "--height=40%", "--reverse", "--no-multi", "--no-info",
-                 "--with-nth=2..", "--delimiter=\t",
-                 "--header=" + title, "--pointer=❯", "--prompt=  ",
-                 "--color=pointer:cyan,fg+:cyan,header:yellow"],
-                input=input_text, capture_output=True, text=True)
-            if result.returncode != 0 or not result.stdout.strip():
+            raw = input(f"\033[1;33mSelect [1-{len(options)}] (default {default+1}): \033[0m").strip()
+            if not raw:
                 return default
+            return max(0, min(len(options) - 1, int(raw) - 1))
+        except Exception:
+            return default
+
+    # Reset colors and move to a clean line before handing over to fzf
+    sys.stdout.write("\033[0m\n")
+    sys.stdout.flush()
+
+    lines = [f"{i}\t{opt}" for i, opt in enumerate(options)]
+    reordered = [lines[default]] + [l for i, l in enumerate(lines) if i != default]
+    input_text = "\n".join(reordered) + "\n"
+
+    try:
+        result = subprocess.run(
+            [
+                "fzf",
+                "--height=8",
+                "--min-height=5",
+                "--layout=reverse",
+                "--no-multi",
+                "--no-mouse",
+                "--no-info",
+                "--no-separator",
+                "--no-scrollbar",
+                "--with-nth=2..",
+                "--delimiter=\t",
+                f"--header={title}",
+                "--header-first",
+                "--pointer=>",
+                "--marker= ",
+                "--prompt=  ",
+                "--color=pointer:cyan,fg+:cyan,header:yellow,prompt:cyan",
+            ],
+            input=input_text,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0 and result.stdout.strip():
             idx_str = result.stdout.strip().split("\t", 1)[0]
             try:
                 idx = int(idx_str)
@@ -123,21 +164,9 @@ def choose_option(title: str, options: list, default: int = 0) -> int:
                     return idx
             except ValueError:
                 pass
-        except Exception:
-            pass
-        return default
-    print(f"\033[1;36m{title}\033[0m")
-    for i, opt in enumerate(options, 1):
-        marker = "❯" if i - 1 == default else " "
-        print(f"  {marker} {i}) {opt}")
-    try:
-        raw = input(f"\033[1;33mSelect [1-{len(options)}] (default {default+1}): \033[0m").strip()
-        if not raw:
-            return default
-        n = int(raw)
-        return max(0, min(len(options) - 1, n - 1))
     except Exception:
-        return default
+        pass
+    return default
 
 
 def ask_web_root_location() -> Path:
@@ -328,16 +357,16 @@ def verify_htdocs_readable(verbose: bool = True) -> bool:
         return False
     if not os.access(str(HTDOCS_DIR), os.R_OK):
         if verbose:
-            print(f"\033[1;31m [!] Web root not readable \033[0m")
+            print("\033[1;31m [!] Web root not readable \033[0m")
         ok = False
     if not os.access(str(HTDOCS_DIR), os.X_OK):
         if verbose:
-            print(f"\033[1;31m [!] Web root not traversable \033[0m")
+            print("\033[1;31m [!] Web root not traversable \033[0m")
         ok = False
     idx = HTDOCS_DIR / "index.php"
     if not idx.exists():
         if verbose:
-            print(f"\033[1;31m [!] index.php missing \033[0m")
+            print("\033[1;31m [!] index.php missing \033[0m")
         ok = False
     else:
         try:
@@ -969,7 +998,6 @@ open_browser() {{
     return 0
 }}
 
-# --- MariaDB lifecycle (Bash versions) ---
 start_mariadb_background() {{
     mkdir -p "$MYSQL_DATA_DIR" "$MYSQL_RUN_DIR"
     [ -S "$MARIADB_SOCKET" ] && rm -f "$MARIADB_SOCKET"
