@@ -12,13 +12,12 @@ from pathlib import Path
 
 CURRENT_VERSION = "2.19.4"
 CHANGELOG = [
-    "Fix: MariaDB root auth — use normal auth (no more ERROR 1698)",
-    "New: Auto-repair broken unix_socket root auth on existing installs",
-    "Fix: setup_mariadb now reports real errors instead of silent failures",
-    "Fix: phpMyAdmin storage — explicit -u root on every mysql call",
-    "Improvement: Reinstall menu label shortened to 'keeps DBs+htdocs'",
+    "New: Quickstart hidden when server is stopped (prevents DB-less installs)",
+    "New: 'myserver quickstart' checks server status first",
+    "Fix: (carried) MariaDB normal auth (no more ERROR 1698)",
+    "Fix: (carried) Auto-repair broken unix_socket root auth",
     "Fix: (carried) fzf clean menu rendering",
-    "Fix: (carried) 'command not found' during uninstall",
+    "Fix: (carried) Full wipe on uninstall, preserve on reinstall",
 ]
 
 PREFIX = Path(os.environ.get('PREFIX', '/data/data/com.termux/files/usr'))
@@ -429,33 +428,22 @@ def stop_mariadb_cleanly():
 
 
 def repair_root_if_unix_socket():
-    """
-    Detect a MariaDB install where root uses unix_socket auth (which fails
-    on Termux because the OS user is not 'root'), and repair it using
-    --skip-grant-tables mode.
-    """
     if not MARIADB_SOCKET.exists():
         return
     cli = mysql_client()
-
-    # Try a normal connection
     r = subprocess.run(
         f"{cli} -u root --socket='{MARIADB_SOCKET}' -e 'SELECT 1;'",
         shell=True, capture_output=True, text=True, timeout=10)
     if r.returncode == 0:
-        return  # Already fine
-
+        return
     err = (r.stderr or "").lower()
     if "1698" not in err and "unix_socket" not in err and "access denied" not in err:
-        return  # Not a unix_socket issue — leave it alone
+        return
 
     print("\033[1;33m [*] Detected broken root auth — repairing via skip-grant-tables...\033[0m")
-
-    # 1. Stop MariaDB
     stop_mariadb_cleanly()
     time.sleep(2)
 
-    # 2. Start with --skip-grant-tables
     if command_exists("mariadbd-safe"):
         cmd = (f"mariadbd-safe --skip-grant-tables --skip-networking "
                f"--datadir='{MYSQL_DATA_DIR}' --socket='{MARIADB_SOCKET}'")
@@ -474,10 +462,8 @@ def repair_root_if_unix_socket():
     if not ok:
         print("\033[1;31m [!] Repair failed: MariaDB did not start.\033[0m")
         return
-
     time.sleep(2)
 
-    # 3. Fix root auth using multiple SQL strategies (MariaDB version-safe)
     fix_sql = (
         "UPDATE mysql.user SET plugin='mysql_native_password' "
         "WHERE User='root' AND Host='localhost';"
@@ -491,7 +477,6 @@ def repair_root_if_unix_socket():
         f"{cli} -u root --socket='{MARIADB_SOCKET}' -e \"{fix_sql}\"",
         shell=True, capture_output=True, text=True)
 
-    # 4. Stop and restart normally
     stop_mariadb_cleanly()
     time.sleep(2)
 
@@ -522,9 +507,6 @@ def setup_mariadb():
         fresh_install = not (MYSQL_DATA_DIR / "mysql").exists()
 
         if fresh_install:
-            # KEY FIX: use normal auth (mysql_native_password) instead of
-            # unix_socket. Termux OS user is not "root", so unix_socket
-            # would reject every connection with ERROR 1698.
             run_cmd(f"mariadb-install-db --auth-root-authentication-method=normal "
                     f"--datadir='{MYSQL_DATA_DIR}'")
             print("\033[1;32m [✓] MariaDB database initialized (normal auth). \033[0m")
@@ -535,12 +517,9 @@ def setup_mariadb():
             print("\033[1;31m [!] Failed to start MariaDB. \033[0m")
             return False
 
-        # If existing install had unix_socket auth, try to repair it now.
         repair_root_if_unix_socket()
-
         cli = mysql_client()
 
-        # Hardening (capture errors so we see the real ones)
         if MARIADB_SOCKET.exists():
             sec_sql = (
                 "DELETE FROM mysql.user WHERE User='';"
@@ -940,8 +919,6 @@ def setup_phpmyadmin_storage(pma_dir: Path) -> bool:
         return False
 
     cli = mysql_client()
-
-    # Explicit -u root on every call
     r = subprocess.run(
         f"{cli} -u root --socket='{MARIADB_SOCKET}' -e "
         f"\"CREATE DATABASE IF NOT EXISTS phpmyadmin "
@@ -1105,6 +1082,10 @@ open_browser() {{
     return 0
 }}
 
+server_is_running() {{
+    pgrep -f nginx > /dev/null || pgrep -f php-fpm > /dev/null || pgrep -f "mariadb|mysqld" > /dev/null || pgrep -f redis-server > /dev/null
+}}
+
 start_mariadb_background() {{
     mkdir -p "$MYSQL_DATA_DIR" "$MYSQL_RUN_DIR"
     [ -S "$MARIADB_SOCKET" ] && rm -f "$MARIADB_SOCKET"
@@ -1209,7 +1190,7 @@ show_banner_and_status() {{
     echo -e "\033[1;35m===============================================\033[0m\n"
 
     SVC_INFO=0
-    pgrep -f nginx > /dev/null || pgrep -f php-fpm > /dev/null || pgrep -f "mariadb|mysqld" > /dev/null || pgrep -f redis-server > /dev/null && SVC_INFO=1
+    server_is_running && SVC_INFO=1
     TUNNEL_URL_VAL=$(get_tunnel_url)
     TUNNEL_ACTIVE=0
     is_tunnel_running && [ -n "$TUNNEL_URL_VAL" ] && TUNNEL_ACTIVE=1
@@ -1269,7 +1250,7 @@ stop_services() {{
 restart_services() {{ stop_services; sleep 1; start_services; }}
 
 enable_internet() {{
-    if ! pgrep -f nginx > /dev/null && ! pgrep -f php-fpm > /dev/null && ! pgrep -f "mariadb|mysqld" > /dev/null && ! pgrep -f redis-server > /dev/null; then
+    if ! server_is_running; then
         echo -e "\033[1;31m[!] Server is not running.\033[0m"
         sleep 2
         return
@@ -1313,6 +1294,14 @@ disable_internet() {{
 }}
 
 quickstart_menu() {{
+    # SAFETY: quickstart requires the server to be running so MariaDB
+    # is available for database creation.
+    if ! server_is_running; then
+        echo -e "\033[1;31m[!] The server is not running.\033[0m"
+        echo -e "\033[1;33m    Please start it first: myserver start\033[0m"
+        sleep 3
+        return
+    fi
     echo -e "\033[1;35m============================================\033[0m"
     echo -e "\033[1;35m      QUICKSTART FRAMEWORK INSTALLER        \033[0m"
     echo -e "\033[1;35m============================================\033[0m"
@@ -1581,13 +1570,14 @@ fi
 
 while true; do
     show_banner_and_status
-    if pgrep -f nginx > /dev/null || pgrep -f php-fpm > /dev/null || pgrep -f "mariadb|mysqld" > /dev/null || pgrep -f redis-server > /dev/null; then
+    if server_is_running; then
         SERVER_RUNNING=1
     else
         SERVER_RUNNING=0
     fi
 
     if [ "$SERVER_RUNNING" -eq 1 ]; then
+        # ====== RUNNING MENU ======
         echo -e "\033[1;33mSelect an option:\033[0m"
         echo -e "\033[1;33m 1) stop             (Stop all services)\033[0m"
         is_tunnel_running && echo -e "\033[1;33m 2) Disable Internet (disable internet access)\033[0m" || echo -e "\033[1;33m 2) Enable Internet  (enable internet access)\033[0m"
@@ -1613,24 +1603,23 @@ while true; do
             *) echo -e "\033[1;31mInvalid.\033[0m"; sleep 1 ;;
         esac
     else
+        # ====== STOPPED MENU (no quickstart) ======
         echo -e "\033[1;33mSelect an option:\033[0m"
         echo -e "\033[1;33m 1) start            (Start all services)\033[0m"
-        echo -e "\033[1;33m 2) quickstart       (Install WP / Laravel / Nextcloud)\033[0m"
-        echo -e "\033[1;33m 3) refresh status   (Re-check server status)\033[0m"
-        echo -e "\033[1;33m 4) update           (Check and apply updates)\033[0m"
-        echo -e "\033[1;33m 5) reinstall        (To fix issues — keeps DBs+htdocs)\033[0m"
-        echo -e "\033[1;33m 6) uninstall        (Remove server + DBs + htdocs)\033[0m"
-        echo -e "\033[1;33m 7) exit\033[0m"
+        echo -e "\033[1;33m 2) refresh status   (Re-check server status)\033[0m"
+        echo -e "\033[1;33m 3) update           (Check and apply updates)\033[0m"
+        echo -e "\033[1;33m 4) reinstall        (To fix issues — keeps DBs+htdocs)\033[0m"
+        echo -e "\033[1;33m 5) uninstall        (Remove server + DBs + htdocs)\033[0m"
+        echo -e "\033[1;33m 6) exit\033[0m"
         echo ""
-        read -p $'\033[1;33mEnter choice [1-7]: \033[0m' choice
+        read -p $'\033[1;33mEnter choice [1-6]: \033[0m' choice
         case "$choice" in
             1|start) start_services ;;
-            2|quickstart) quickstart_menu ;;
-            3|refresh) continue ;;
-            4|update) update_server manual ;;
-            5|reinstall) reinstall_server ;;
-            6|uninstall|delete) uninstall_server ;;
-            7|exit) echo -e "\033[1;32mBye!\033[0m"; exit 0 ;;
+            2|refresh) continue ;;
+            3|update) update_server manual ;;
+            4|reinstall) reinstall_server ;;
+            5|uninstall|delete) uninstall_server ;;
+            6|exit) echo -e "\033[1;32mBye!\033[0m"; exit 0 ;;
             *) echo -e "\033[1;31mInvalid.\033[0m"; sleep 1 ;;
         esac
     fi
