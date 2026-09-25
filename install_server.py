@@ -10,14 +10,15 @@ import secrets
 import getpass
 from pathlib import Path
 
-CURRENT_VERSION = "2.19.0"
+CURRENT_VERSION = "2.19.1"
 CHANGELOG = [
-    "Fix: Use `mariadb`/`mariadb-admin` (no more deprecation warnings)",
-    "Fix: phpMyAdmin storage import uses --force + better diagnostics",
-    "New: Uninstall drops all user databases + wipes MariaDB data dir + removes htdocs",
-    "New: Reinstall/update preserves databases, password, htdocs; only refreshes phpMyAdmin",
-    "New: Reinstall mode auto-detected (no password prompt, uses ~/.my.cnf)",
-    "Fix: (carried) fzf menu, Nginx FUSE-safe, phpMyAdmin 503, storage auto-setup",
+    "Fix: 'start_mariadb_background: command not found' during uninstall",
+    "Fix: 'stop_mariadb_cleanly: command not found' during uninstall",
+    "Fix: Added bash equivalents of MariaDB lifecycle helpers in CLI",
+    "Improvement: (carried) Full wipe on uninstall, preserve on reinstall",
+    "Fix: (carried) mariadb client (no more deprecation warnings)",
+    "Fix: (carried) phpMyAdmin storage import uses --force",
+    "Fix: (carried) fzf menu, Nginx FUSE-safe, phpMyAdmin 503",
 ]
 
 PREFIX = Path(os.environ.get('PREFIX', '/data/data/com.termux/files/usr'))
@@ -42,7 +43,7 @@ MARIADB_SOCKET = MYSQL_RUN_DIR / "mysqld.sock"
 GITHUB_RAW_URL = "https://raw.githubusercontent.com/elias0esmail/termux-web-server/main"
 
 DB_ROOT_PASSWORD = ""
-REINSTALL_MODE = False  # set to True if existing installation detected
+REINSTALL_MODE = False
 
 PHP_EXPECTED_EXTENSIONS = [
     "mysqli", "pdo_mysql", "mbstring", "openssl",
@@ -78,12 +79,10 @@ def is_process_running(pattern: str) -> bool:
 
 
 def mysql_client() -> str:
-    """Return the preferred client binary (mariadb > mysql)."""
     return "mariadb" if command_exists("mariadb") else "mysql"
 
 
 def mysql_admin() -> str:
-    """Return the preferred admin binary (mariadb-admin > mysqladmin)."""
     return "mariadb-admin" if command_exists("mariadb-admin") else "mysqladmin"
 
 
@@ -127,7 +126,6 @@ def choose_option(title: str, options: list, default: int = 0) -> int:
         except Exception:
             pass
         return default
-    # Fallback
     print(f"\033[1;36m{title}\033[0m")
     for i, opt in enumerate(options, 1):
         marker = "❯" if i - 1 == default else " "
@@ -191,7 +189,6 @@ def write_my_cnf(password: str, sock_path: Path):
 
 
 def read_password_from_my_cnf() -> str:
-    """Return the password from ~/.my.cnf, or '' if not set."""
     if not MY_CNF_FILE.exists():
         return ""
     try:
@@ -199,8 +196,7 @@ def read_password_from_my_cnf() -> str:
             line = line.strip()
             if line.startswith("password"):
                 _, _, val = line.partition("=")
-                val = val.strip().strip('"').strip("'")
-                return val
+                return val.strip().strip('"').strip("'")
     except Exception:
         pass
     return ""
@@ -332,11 +328,11 @@ def verify_htdocs_readable(verbose: bool = True) -> bool:
         return False
     if not os.access(str(HTDOCS_DIR), os.R_OK):
         if verbose:
-            print(f"\033[1;31m [!] Web root not readable: {HTDOCS_DIR} \033[0m")
+            print(f"\033[1;31m [!] Web root not readable \033[0m")
         ok = False
     if not os.access(str(HTDOCS_DIR), os.X_OK):
         if verbose:
-            print(f"\033[1;31m [!] Web root not traversable: {HTDOCS_DIR} \033[0m")
+            print(f"\033[1;31m [!] Web root not traversable \033[0m")
         ok = False
     idx = HTDOCS_DIR / "index.php"
     if not idx.exists():
@@ -374,7 +370,7 @@ def print_htdocs_diagnostic():
 
 
 # ===========================================================================
-# MariaDB lifecycle
+# MariaDB lifecycle (Python side)
 # ===========================================================================
 def start_mariadb_background():
     MYSQL_DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -412,7 +408,7 @@ def stop_mariadb_cleanly():
 
 
 # ===========================================================================
-# MariaDB setup
+# Setup: MariaDB
 # ===========================================================================
 def setup_mariadb():
     try:
@@ -439,7 +435,6 @@ def setup_mariadb():
 
         cli = mysql_client()
 
-        # Hardening (idempotent — safe on reinstall)
         if MARIADB_SOCKET.exists():
             sec_sql = (
                 "DELETE FROM mysql.user WHERE User='';"
@@ -453,11 +448,9 @@ def setup_mariadb():
             print("\033[1;32m [✓] MariaDB Security Hardening applied. \033[0m")
 
         if REINSTALL_MODE:
-            # Keep existing credentials untouched.
             print("\033[1;36m [i] Reinstall mode — preserving root credentials. \033[0m")
             return True
 
-        # Fresh install: write .my.cnf and set chosen password
         write_my_cnf("", MARIADB_SOCKET)
 
         if DB_ROOT_PASSWORD:
@@ -487,7 +480,7 @@ def setup_mariadb():
 
 
 # ===========================================================================
-# Redis / PHP-FPM / SSL / Nginx / php.ini / htdocs  (unchanged from 2.18.2)
+# Setup: Redis / PHP-FPM / SSL / Nginx / php.ini / htdocs
 # ===========================================================================
 def setup_redis():
     try:
@@ -820,12 +813,10 @@ def setup_phpmyadmin_storage(pma_dir: Path) -> bool:
         return False
 
     cli = mysql_client()
-
     run_cmd(f"{cli} --socket='{MARIADB_SOCKET}' -e "
             f"\"CREATE DATABASE IF NOT EXISTS phpmyadmin "
             f"DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;\"")
 
-    # --force: continue even if some CREATE statements fail (e.g. FK order).
     r = subprocess.run(
         f"{cli} --socket='{MARIADB_SOCKET}' --force phpmyadmin < '{sql_create_tables}'",
         shell=True, capture_output=True, text=True)
@@ -834,7 +825,6 @@ def setup_phpmyadmin_storage(pma_dir: Path) -> bool:
         snippet = snippet[0][:200] if snippet else "unknown error"
         print(f"\033[1;33m [!] Import note: {snippet} \033[0m")
 
-    # Count tables actually created
     r = subprocess.run(
         f"{cli} --socket='{MARIADB_SOCKET}' -N -B -e "
         f"\"SHOW TABLES FROM phpmyadmin LIKE 'pma\\\\_%';\"",
@@ -952,7 +942,6 @@ TUNNEL_URL_FILE="$PREFIX/tmp/cloudflared.url"
 TUNNEL_LOG="$PREFIX/tmp/cloudflared.log"
 MARIADB_SOCKET="$MYSQL_RUN_DIR/mysqld.sock"
 
-# Prefer mariadb over mysql (avoids deprecation warnings)
 MYSQL_CLI=$(command -v mariadb || command -v mysql)
 MYSQL_ADMIN=$(command -v mariadb-admin || command -v mysqladmin)
 
@@ -978,6 +967,38 @@ has_internet() {{
 open_browser() {{
     command -v termux-open-url &> /dev/null && termux-open-url "http://localhost:8080" > /dev/null 2>&1 &
     return 0
+}}
+
+# --- MariaDB lifecycle (Bash versions) ---
+start_mariadb_background() {{
+    mkdir -p "$MYSQL_DATA_DIR" "$MYSQL_RUN_DIR"
+    [ -S "$MARIADB_SOCKET" ] && rm -f "$MARIADB_SOCKET"
+    [ ! -d "$MYSQL_DATA_DIR/mysql" ] && mariadb-install-db --datadir="$MYSQL_DATA_DIR" > /dev/null 2>&1
+    if command -v mariadbd-safe &> /dev/null; then
+        mariadbd-safe --datadir="$MYSQL_DATA_DIR" --socket="$MARIADB_SOCKET" > /dev/null 2>&1 &
+    else
+        mariadbd --datadir="$MYSQL_DATA_DIR" --socket="$MARIADB_SOCKET" > /dev/null 2>&1 &
+    fi
+    local i=0
+    while [ $i -lt 15 ]; do
+        [ -S "$MARIADB_SOCKET" ] && return 0
+        sleep 1
+        i=$((i+1))
+    done
+    [ -S "$MARIADB_SOCKET" ]
+}}
+
+stop_mariadb_cleanly() {{
+    if [ -S "$MARIADB_SOCKET" ]; then
+        "$MYSQL_ADMIN" --socket="$MARIADB_SOCKET" shutdown 2>/dev/null
+        sleep 2
+    fi
+    pkill -TERM -f "mariadbd-safe" > /dev/null 2>&1
+    pkill -TERM -f "mysqld_safe"   > /dev/null 2>&1
+    sleep 1
+    pkill -TERM -f "mariadbd|mysqld" > /dev/null 2>&1
+    sleep 1
+    pkill -KILL -f "mariadbd|mysqld" > /dev/null 2>&1
 }}
 
 sync_php_extensions() {{
@@ -1073,22 +1094,9 @@ start_services() {{
     sync_php_extensions
     check_webroot
     echo -e "\033[1;34m[+] Starting MariaDB...\033[0m"
-    mkdir -p "$MYSQL_DATA_DIR" "$MYSQL_RUN_DIR"
     if ! pgrep -f "mariadb|mysqld" > /dev/null; then
-        [ -S "$MARIADB_SOCKET" ] && rm -f "$MARIADB_SOCKET"
-        [ ! -d "$MYSQL_DATA_DIR/mysql" ] && mariadb-install-db --datadir="$MYSQL_DATA_DIR" > /dev/null 2>&1
-        if command -v mariadbd-safe &> /dev/null; then
-            mariadbd-safe --datadir="$MYSQL_DATA_DIR" --socket="$MARIADB_SOCKET" > /dev/null 2>&1 &
-        else
-            mariadbd --datadir="$MYSQL_DATA_DIR" --socket="$MARIADB_SOCKET" > /dev/null 2>&1 &
-        fi
+        start_mariadb_background
         echo -e "\033[1;33m[*] Waiting for MariaDB socket...\033[0m"
-        i=0
-        while [ $i -lt 15 ]; do
-            [ -S "$MARIADB_SOCKET" ] && break
-            sleep 1
-            i=$((i+1))
-        done
     fi
     ensure_pma_storage
 
@@ -1115,13 +1123,7 @@ start_services() {{
 stop_services() {{
     is_tunnel_running && disable_internet
     echo -e "\033[1;33m[*] Stopping all services (graceful)...\033[0m"
-    [ -S "$MARIADB_SOCKET" ] && {{ "$MYSQL_ADMIN" --socket="$MARIADB_SOCKET" shutdown 2>/dev/null; sleep 2; }}
-    pkill -TERM -f "mariadbd-safe" > /dev/null 2>&1
-    pkill -TERM -f "mysqld_safe"   > /dev/null 2>&1
-    sleep 1
-    pkill -TERM -f "mariadbd|mysqld" > /dev/null 2>&1
-    sleep 1
-    pkill -KILL -f "mariadbd|mysqld" > /dev/null 2>&1
+    stop_mariadb_cleanly
     pkill -f nginx > /dev/null 2>&1
     pkill -f php-fpm > /dev/null 2>&1
     pkill -f redis-server > /dev/null 2>&1
@@ -1375,7 +1377,6 @@ uninstall_server() {{
 
             echo -e "\033[1;33m[*] Starting MariaDB to drop databases...\033[0m"
             if start_mariadb_background; then
-                # Drop every non-system database
                 DBS=$("$MYSQL_CLI" --socket="$MARIADB_SOCKET" -N -B -e \
                     "SHOW DATABASES WHERE \`Database\` NOT IN ('mysql','information_schema','performance_schema','sys');" 2>/dev/null)
                 for db in $DBS; do
@@ -1385,6 +1386,8 @@ uninstall_server() {{
                 done
                 echo -e "\033[1;32m[OK] All user databases dropped.\033[0m"
                 stop_mariadb_cleanly
+            else
+                echo -e "\033[1;33m[!] MariaDB failed to start — proceeding without DB drop.\033[0m"
             fi
 
             echo -e "\033[1;33m[*] Removing configuration files...\033[0m"
@@ -1543,7 +1546,6 @@ def main():
     global HTDOCS_DIR, DB_ROOT_PASSWORD, REINSTALL_MODE
 
     try:
-        # --- Detect reinstall mode ---
         existing_data = (MYSQL_DATA_DIR / "mysql").exists()
         existing_cnf = MY_CNF_FILE.exists()
         REINSTALL_MODE = existing_data and existing_cnf
@@ -1560,7 +1562,6 @@ def main():
 
         ensure_fzf()
 
-        # --- Resolve web root ---
         saved_path = None
         if HTDOCS_PATH_FILE.exists():
             try:
@@ -1580,7 +1581,6 @@ def main():
                 pass
             print(f"\033[1;32m [✓] Web root set to: {HTDOCS_DIR} \033[0m")
 
-        # --- Password prompt (fresh only) ---
         if REINSTALL_MODE:
             DB_ROOT_PASSWORD = read_password_from_my_cnf()
             if DB_ROOT_PASSWORD:
@@ -1596,7 +1596,6 @@ def main():
                 print("\033[1;33m [i] MariaDB root will have NO password. \033[0m")
             print()
 
-        # --- Pre-flight php.ini cleanup ---
         ini_path = get_php_ini_path()
         if ini_path.exists():
             removed = clean_php_ini_legacy(ini_path)
