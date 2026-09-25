@@ -11,15 +11,14 @@ import string
 from pathlib import Path
 
 # Current Version & Release Notes
-CURRENT_VERSION = "2.15.0"
+CURRENT_VERSION = "2.16.0"
 CHANGELOG = [
-    "Fix: Real Termux PHP 8.5 extension model (built-in vs packaged)",
-    "Fix: Use `php -m` as source of truth instead of scanning .so paths",
-    "Fix: Correct package names (php-sodium, php-redis, php-apcu, php-imagick)",
-    "Fix: Remove non-existent packages (php-mysqli, php-curl, php-zip, php-xml, ...)",
-    "Fix: Auto-detect PHP's real extension_dir via `php -r`",
-    "Improvement: Cleaner install report (loaded vs optional vs missing)",
-    "Improvement: sync_php_extensions now uses php -m for accuracy",
+    "Fix: Deterministic PHP extension detection (cache ext_dir + .so list once)",
+    "Fix: Use `php -n -r` to bypass conf.d interference during extension_dir lookup",
+    "Fix: No more contradictory 'Registered' then 'missing' reports",
+    "Improvement: Diagnostic block reconciling with pkg list-installed",
+    "Improvement: Show available .so files and installed php-* packages",
+    "Fix: (carried) Real Termux PHP 8.5 extension model",
     "Security: (carried) PHP path traversal fix + phpMyAdmin AllowNoPassword OFF",
     "Fix: (carried) MariaDB stopped cleanly after installation",
     "Fix: (carried) conf.d auto-generation with stale cleanup",
@@ -41,28 +40,17 @@ REPO_DIR = Path(__file__).resolve().parent
 GITHUB_RAW_URL = "https://raw.githubusercontent.com/elias0esmail/termux-web-server/main"
 
 # ---------------------------------------------------------------------------
-# PHP extension inventory (verified against Termux PHP 8.5.1, Dec 2025)
+# PHP extension inventory (verified against Termux PHP 8.5.1)
 # ---------------------------------------------------------------------------
 
 # Extensions we EXPECT to be available after install.
-# Built-in ones are compiled INTO the main 'php' package — no .so file,
-# no separate installable package.
+# Built-in ones are compiled INTO the main 'php' package.
 PHP_EXPECTED_EXTENSIONS = [
-    # Built-in to the main php package:
-    "mysqli",
-    "pdo_mysql",
-    "mbstring",
-    "openssl",
-    "curl",
-    "zip",
-    "xml",
-    "intl",
-    "bcmath",
-    # Provided by separate Termux packages (checked at runtime):
-    "gd",
-    "sodium",
-    "redis",
-    "apcu",
+    # Built-in:
+    "mysqli", "pdo_mysql", "mbstring", "openssl",
+    "curl", "zip", "xml", "intl", "bcmath",
+    # External (need conf.d registration):
+    "gd", "sodium", "redis", "apcu",
 ]
 
 # Extensions bundled INSIDE the main php package (no .so lookup needed).
@@ -72,7 +60,6 @@ PHP_BUILTIN_EXTENSIONS = {
 }
 
 # Termux packages that ACTUALLY EXIST and provide PHP extensions.
-# Source: `pkg search php` on Termux PHP 8.5.1.
 PHP_EXT_PACKAGES = {
     "gd":      "php-gd",
     "sodium":  "php-sodium",
@@ -123,7 +110,7 @@ def get_php_confd_dir() -> Path:
 
 
 # ---------------------------------------------------------------------------
-# PHP introspection helpers (source of truth = the php binary itself)
+# PHP introspection helpers (source of truth = the php binary)
 # ---------------------------------------------------------------------------
 def php_loaded_extensions() -> set:
     """Return the set of extensions PHP reports as loaded (lowercase)."""
@@ -142,34 +129,72 @@ def php_loaded_extensions() -> set:
 
 
 def php_extension_dir() -> Path:
-    """Ask PHP itself where its extension_dir is."""
+    """
+    Get PHP's extension_dir WITHOUT loading any ini/conf.d files.
+
+    Why `php -n`? Because once we write conf.d/gd.ini, a normal `php -r`
+    call would try to load gd.so and may print a warning to stdout,
+    contaminating the path we're trying to read. Using `-n` bypasses
+    ini + conf.d entirely and returns the compiled-in default path.
+    """
+    # Method 1: php -n -r (fast, isolated)
     try:
         r = subprocess.run(
-            ["php", "-r", 'echo ini_get("extension_dir");'],
+            ["php", "-n", "-r", 'echo ini_get("extension_dir");'],
             capture_output=True, text=True, timeout=5
         )
         if r.returncode == 0 and r.stdout.strip():
-            return Path(r.stdout.strip())
+            lines = [ln.strip() for ln in r.stdout.strip().splitlines() if ln.strip()]
+            if lines:
+                p = Path(lines[-1])
+                if p.is_absolute():
+                    return p
     except Exception:
         pass
+
+    # Method 2: parse `php -i` output
+    try:
+        r = subprocess.run(["php", "-i"], capture_output=True,
+                           text=True, timeout=10)
+        if r.returncode == 0:
+            for line in r.stdout.splitlines():
+                if line.lower().startswith("extension_dir"):
+                    _, _, val = line.partition("=>")
+                    val = val.strip()
+                    if val and val.startswith("/"):
+                        return Path(val)
+    except Exception:
+        pass
+
     return PHP_LIB_DIR
 
 
-def php_ext_loaded(name: str) -> bool:
-    """True if PHP currently reports this extension as loaded."""
-    return name.lower() in php_loaded_extensions()
+def scan_available_so(ext_dir: Path) -> set:
+    """Return the set of extension names (.so stems) present in ext_dir."""
+    found = set()
+    try:
+        if ext_dir.exists():
+            for so in ext_dir.glob("*.so"):
+                found.add(so.stem)
+    except Exception:
+        pass
+    return found
 
 
-def php_ext_so_exists(name: str) -> bool:
-    """True if a physical .so exists in PHP's real extension_dir."""
-    ext_dir = php_extension_dir()
+def php_ext_so_exists(name: str, ext_dir: Path = None) -> bool:
+    """True if a physical .so exists in PHP's extension_dir."""
+    if ext_dir is None:
+        ext_dir = php_extension_dir()
     if not ext_dir.exists():
         return False
     return (ext_dir / f"{name}.so").exists()
 
 
+def php_ext_loaded(name: str) -> bool:
+    return name.lower() in php_loaded_extensions()
+
+
 def php_ext_installed(name: str) -> bool:
-    """An extension is 'installed' if PHP reports it OR a .so exists."""
     if php_ext_loaded(name):
         return True
     if php_ext_so_exists(name):
@@ -181,8 +206,6 @@ def clean_php_ini_legacy(ini_path: Path) -> int:
     """
     Remove legacy 'extension=...' lines from php.ini that cause PHP startup
     warnings when the corresponding .so is not present.
-
-    Returns the number of lines removed.
     """
     if not ini_path.exists():
         return 0
@@ -202,14 +225,28 @@ def clean_php_ini_legacy(ini_path: Path) -> int:
     return n
 
 
+def list_installed_php_packages() -> set:
+    """Return the set of php-* Termux packages currently installed."""
+    pkgs = set()
+    try:
+        r = subprocess.run(
+            "pkg list-installed 2>/dev/null | grep '^php-'",
+            shell=True, capture_output=True, text=True, timeout=15
+        )
+        for ln in r.stdout.splitlines():
+            name = ln.split("/")[0].strip()
+            if name:
+                pkgs.add(name)
+    except Exception:
+        pass
+    return pkgs
+
+
 # ---------------------------------------------------------------------------
 # MariaDB
 # ---------------------------------------------------------------------------
 def setup_mariadb():
-    """
-    Initialize MariaDB, apply security hardening, then STOP it cleanly.
-    Uses `mariadbd` directly (NOT the supervisor) so shutdown is final.
-    """
+    """Initialize MariaDB, harden, then stop cleanly."""
     try:
         data_dir = PREFIX / "var/lib/mysql"
         run_dir = PREFIX / "var/run/mysqld"
@@ -251,7 +288,6 @@ def setup_mariadb():
         run_cmd(f"mysqladmin --socket='{sock_path}' shutdown")
         time.sleep(2)
 
-        # Kill supervisors FIRST (otherwise they respawn mariadbd)
         for pattern in ("mariadbd-safe", "mysqld_safe"):
             run_cmd(f"pkill -TERM -f '{pattern}'")
         time.sleep(1)
@@ -543,14 +579,17 @@ http {{
 
 
 # ---------------------------------------------------------------------------
-# php.ini  +  conf.d management (source of truth = `php -m`)
+# php.ini  +  conf.d management (DETERMINISTIC — caches ext_dir once)
 # ---------------------------------------------------------------------------
 def create_php_ini():
     """
-    Write php.ini and keep conf.d/*.ini in sync with reality.
+    Write php.ini and keep conf.d/*.ini in sync.
 
-    Uses `php -m` as the source of truth (NOT .so scanning) because many
-    extensions are compiled INTO the php binary in Termux and have no .so.
+    KEY FIX: we compute `extension_dir`, `available .so files`, and
+    `loaded extensions` ONCE at the start, then use these cached values
+    for every subsequent check. This prevents the contradictory
+    'registered' then 'missing' report caused by conf.d changes
+    affecting later `php -r` calls.
     """
     php_ini_path = get_php_ini_path()
     PHP_CONFD_DIR.mkdir(parents=True, exist_ok=True)
@@ -561,11 +600,21 @@ def create_php_ini():
     if removed:
         print(f"\033[1;33m [*] Removed {removed} legacy 'extension=' line(s) from php.ini \033[0m")
 
-    # --- 2. Discover PHP's real extension_dir ---
+    # --- 2. Discover extension_dir ONCE (using -n to avoid conf.d) ---
     ext_dir = php_extension_dir()
     print(f"\033[1;36m [i] PHP extension_dir = {ext_dir} \033[0m")
 
-    # --- 3. Write fresh php.ini ---
+    # --- 3. Scan available .so files ONCE ---
+    available_so = scan_available_so(ext_dir)
+    if available_so:
+        print(f"\033[1;36m [i] Available .so files: {', '.join(sorted(available_so))} \033[0m")
+    else:
+        print(f"\033[1;33m [i] No .so files found in {ext_dir} \033[0m")
+
+    # --- 4. Snapshot loaded extensions ONCE (before our conf.d changes) ---
+    loaded_before = php_loaded_extensions()
+
+    # --- 5. Write fresh php.ini ---
     php_ini_content = f"""\
 upload_max_filesize = 512M
 post_max_size = 512M
@@ -601,18 +650,13 @@ session.gc_maxlifetime = 1440
         print(f"\033[1;31m [!] php.ini error: {e}\033[0m")
         return False
 
-    # --- 4. Sync conf.d for external .so extensions only ---
-    loaded = php_loaded_extensions()
+    # --- 6. Sync conf.d using CACHED data (no new subprocess calls) ---
     synced_so = []
     for ext in PHP_EXPECTED_EXTENSIONS:
-        # Skip built-ins already loaded (no .so needed)
-        if ext in PHP_BUILTIN_EXTENSIONS and ext in loaded:
-            continue
-
         ini_file = PHP_CONFD_DIR / f"{ext}.ini"
 
-        if ext in loaded:
-            # Already loaded (php auto-registered it) → no conf.d needed
+        # Case A: already loaded → no conf.d needed
+        if ext in loaded_before:
             if ini_file.exists():
                 try:
                     ini_file.unlink()
@@ -620,7 +664,8 @@ session.gc_maxlifetime = 1440
                     pass
             continue
 
-        if php_ext_so_exists(ext):
+        # Case B: .so available → register
+        if ext in available_so:
             desired = f"extension={ext}.so\n"
             try:
                 if not ini_file.exists() or ini_file.read_text() != desired:
@@ -628,34 +673,50 @@ session.gc_maxlifetime = 1440
                     synced_so.append(ext)
             except Exception:
                 pass
-        else:
-            # No .so → remove any stale conf.d
+            continue
+
+        # Case C: no .so → remove stale conf.d
+        if ini_file.exists():
             try:
-                if ini_file.exists():
-                    ini_file.unlink()
+                ini_file.unlink()
             except Exception:
                 pass
 
     if synced_so:
         print(f"\033[1;32m [✓] Registered via conf.d: {', '.join(synced_so)} \033[0m")
 
-    # --- 5. Report loaded extensions ---
-    loaded_sorted = sorted(loaded)
+    # --- 7. Report loaded extensions ---
+    loaded_sorted = sorted(loaded_before)
     preview = ", ".join(loaded_sorted[:15])
     suffix = "..." if len(loaded_sorted) > 15 else ""
-    print(f"\033[1;32m [✓] PHP loaded extensions: {preview}{suffix} \033[0m")
+    print(f"\033[1;32m [✓] PHP loaded {len(loaded_sorted)} extensions: {preview}{suffix} \033[0m")
 
-    # --- 6. Report only REAL missing packages (that actually exist in repos) ---
+    # --- 8. Missing packages (using CACHED data only) ---
     missing_pkgs = []
     for ext, pkg in sorted(PHP_EXT_PACKAGES.items()):
-        if ext not in loaded and not php_ext_so_exists(ext):
-            missing_pkgs.append(pkg)
+        if ext in loaded_before:
+            continue
+        if ext in available_so:
+            continue
+        missing_pkgs.append(pkg)
 
     if missing_pkgs:
         print(f"\033[1;33m [!] Optional packages not installed: {', '.join(missing_pkgs)} \033[0m")
         print(f"\033[1;33m     To install: pkg install {' '.join(missing_pkgs)} \033[0m")
     else:
         print("\033[1;32m [✓] All available PHP extension packages are installed. \033[0m")
+
+    # --- 9. Diagnostic: reconcile with pkg list-installed ---
+    installed_pkgs = list_installed_php_packages()
+    if installed_pkgs:
+        print(f"\033[1;36m [i] Termux php-* packages installed: "
+              f"{', '.join(sorted(installed_pkgs))} \033[0m")
+
+        # Warn if a package is installed but its .so wasn't found where PHP looks
+        for ext, pkg in sorted(PHP_EXT_PACKAGES.items()):
+            if pkg in installed_pkgs and ext not in available_so and ext not in loaded_before:
+                print(f"\033[1;33m [!] {pkg} is installed but {ext}.so was not "
+                      f"found in {ext_dir} \033[0m")
 
     return True
 
@@ -806,9 +867,9 @@ has_internet() {{
 }}
 
 sync_php_extensions() {{
-    # Source of truth = php -m (many extensions are built into php in Termux).
+    # Use `php -n` (no ini/conf.d) to get the compile-time extension_dir.
     local ext_dir
-    ext_dir=$(php -r 'echo ini_get("extension_dir");' 2>/dev/null)
+    ext_dir=$(php -n -r 'echo ini_get("extension_dir");' 2>/dev/null | tail -n1)
     [ -z "$ext_dir" ] && ext_dir="$PHP_LIB_DIR"
     mkdir -p "$ext_dir" "$PHP_CONFD_DIR" 2>/dev/null
 
@@ -817,7 +878,6 @@ sync_php_extensions() {{
 
     for ext in gd sodium redis apcu imagick; do
         if echo "$loaded" | grep -qx "$ext"; then
-            # Already loaded → clean any leftover conf.d
             rm -f "$PHP_CONFD_DIR/$ext.ini"
             continue
         fi
@@ -958,7 +1018,6 @@ stop_services() {{
         mysqladmin --socket="$MARIADB_SOCKET" shutdown 2>/dev/null
         sleep 2
     fi
-    # Supervisors FIRST (otherwise they restart mariadbd right away)
     pkill -TERM -f "mariadbd-safe" > /dev/null 2>&1
     pkill -TERM -f "mysqld_safe"   > /dev/null 2>&1
     sleep 1
@@ -1322,7 +1381,6 @@ uninstall_server() {{
             rm -f "$VERSION_FILE"
             rm -f "$TUNNEL_PID_FILE" "$TUNNEL_URL_FILE" "$TUNNEL_LOG"
 
-            # Remove generated conf.d files (only ours)
             for ext in gd sodium redis apcu imagick mysqli pdo_mysql mbstring openssl curl zip xml intl bcmath; do
                 rm -f "$PHP_CONFD_DIR/$ext.ini"
             done
@@ -1488,16 +1546,12 @@ def main():
     try:
         print(f"\033[1;33m[+] Deploying Advanced Nginx + PHP-FPM Server Stack v{CURRENT_VERSION}...\033[0m")
 
-        # --- Pre-flight: clean any legacy extension= lines before we start ---
         ini_path = get_php_ini_path()
         if ini_path.exists():
             removed = clean_php_ini_legacy(ini_path)
             if removed:
                 print(f"\033[1;33m [*] Pre-flight: removed {removed} legacy 'extension=' line(s) from php.ini \033[0m")
 
-        # Only install packages that ACTUALLY EXIST in Termux repos.
-        # Built-in extensions (mysqli, curl, zip, mbstring, ...) ship inside
-        # the main php package and require no separate install.
         php_ext_pkgs = " ".join(sorted(set(PHP_EXT_PACKAGES.values())))
         core_pkgs = (
             "nginx php php-fpm mariadb redis openssl-tool "
@@ -1533,13 +1587,11 @@ def main():
             elif isinstance(action, str):
                 run_cmd(action)
 
-        # Verify critical tools
         missing = [c for c in ["nginx", "php", "php-fpm", "mysqld", "redis-server"]
                    if not command_exists(c)]
         if missing:
             print(f"\033[1;33m [!] Warning: missing binaries: {', '.join(missing)}\033[0m")
 
-        # Final MariaDB state verification
         if is_process_running("mariadbd") or is_process_running("mysqld"):
             print("\033[1;33m [!] Notice: MariaDB left running after install — "
                   "run 'myserver stop' to halt it.\033[0m")
