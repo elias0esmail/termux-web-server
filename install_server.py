@@ -1192,7 +1192,7 @@ show_banner_and_status() {{
     echo " | |  | | |_| |____) |  __/| |    \ V /  __/ |       "
     echo " |_|  |_|\__, |_____/ \___||_|     \_/ \___|_|       "
     echo "          __/ |                                     "
-    echo "         |___/        Server Manager vvv{CURRENT_VERSION}  "
+    echo "         |___/        Server Manager v{CURRENT_VERSION}  "
     echo -e "\033[0m"
     echo -e "\033[1;33m============= [ DEVELOPER INFO ] ==============\033[0m"
     echo -e " Developer : \033[1;32mElias Esmail\033[0m"
