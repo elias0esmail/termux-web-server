@@ -11,18 +11,13 @@ import string
 from pathlib import Path
 
 # Current Version & Release Notes
-CURRENT_VERSION = "2.11.0"
+CURRENT_VERSION = "2.12.0"
 CHANGELOG = [
-    "Security: Fixed PHP path traversal (try_files =404)",
-    "Security: Disabled phpMyAdmin AllowNoPassword",
-    "Security: Added nginx security headers & rate limiting",
-    "Fix: PHP-FPM user/group directives for Termux compatibility",
-    "Fix: Graceful MariaDB shutdown prevents data corruption",
-    "Fix: Dynamic php.ini path detection",
-    "Fix: Python inline update script shell injection",
-    "Fix: Banner ANSI escape rendering in CLI",
-    "Improvement: Nextcloud dedicated DB user",
-    "Improvement: SSL keys chmod 600 + gzip_types",
+    "Fix: PHP extension warnings (use conf.d auto-loading)",
+    "Fix: MariaDB no longer stays running after installation",
+    "Fix: Graceful shutdown kills supervisor processes first",
+    "Improvement: Auto-detect missing PHP extensions with install hint",
+    "Improvement: Post-install MariaDB state verification",
 ]
 
 # System and Environment Paths
@@ -38,6 +33,19 @@ REPO_DIR = Path(__file__).resolve().parent
 
 GITHUB_RAW_URL = "https://raw.githubusercontent.com/elias0esmail/termux-web-server/main"
 
+# PHP extensions that live in separate Termux packages
+PHP_EXT_PACKAGES = {
+    "mysqli":     "php-mysqli",
+    "pdo_mysql":  "php-pdo-mysql",
+    "mbstring":   "php-mbstring",
+    "openssl":    "php-openssl",
+    "curl":       "php-curl",
+    "zip":        "php-zip",
+    "gd":         "php-gd",
+    "intl":       "php-intl",
+    "bcmath":     "php-bcmath",
+}
+
 
 def run_cmd(cmd, check=False):
     return subprocess.run(cmd, shell=True, check=check,
@@ -46,6 +54,13 @@ def run_cmd(cmd, check=False):
 
 def command_exists(cmd):
     return shutil.which(cmd) is not None
+
+
+def is_process_running(pattern: str) -> bool:
+    """Portable process check (Termux has pgrep)."""
+    r = subprocess.run(f"pgrep -f '{pattern}'", shell=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return r.returncode == 0
 
 
 def get_php_ini_path() -> Path:
@@ -58,27 +73,48 @@ def get_php_ini_path() -> Path:
                 return Path(p)
     except Exception:
         pass
-    # Fallbacks commonly used in Termux
     for candidate in [
-        PREFIX / "lib/php.ini",
         PREFIX / "etc/php/php.ini",
+        PREFIX / "lib/php.ini",
         PREFIX / "etc/php.ini",
     ]:
         if candidate.exists():
             return candidate
-    return PREFIX / "lib/php.ini"  # default Termux location
+    return PREFIX / "etc/php/php.ini"
 
 
-def get_php_fpm_conf_dir() -> Path:
-    """Return the directory where php-fpm looks for pool configs."""
-    # Termux usually uses $PREFIX/etc/php-fpm.d/
-    return PHP_FPM_DIR
+def get_php_confd_dir() -> Path:
+    return PREFIX / "etc/php/conf.d"
+
+
+def php_ext_installed(name: str) -> bool:
+    """True if the extension .so exists OR a conf.d ini references it."""
+    so_path = PREFIX / "lib/php" / f"{name}.so"
+    if so_path.exists():
+        return True
+    confd = get_php_confd_dir()
+    if confd.exists():
+        for ini in confd.glob("*.ini"):
+            try:
+                if re.search(rf"^\s*extension\s*=\s*{re.escape(name)}\b",
+                             ini.read_text(), re.MULTILINE):
+                    return True
+            except Exception:
+                continue
+    return False
 
 
 # ---------------------------------------------------------------------------
 # MariaDB
 # ---------------------------------------------------------------------------
 def setup_mariadb():
+    """
+    Initialize MariaDB, apply security hardening, then STOP it cleanly.
+
+    IMPORTANT: We use `mariadbd` directly (NOT `mariadbd-safe`) because
+    `mariadbd-safe` is a supervisor that auto-restarts mariadbd after a
+    graceful shutdown, leaving the daemon running after installation.
+    """
     try:
         data_dir = PREFIX / "var/lib/mysql"
         run_dir = PREFIX / "var/run/mysqld"
@@ -86,7 +122,6 @@ def setup_mariadb():
         run_dir.mkdir(parents=True, exist_ok=True)
 
         sock_path = run_dir / "mysqld.sock"
-        # Clean stale socket from previous crash
         if sock_path.exists():
             try:
                 sock_path.unlink()
@@ -97,11 +132,8 @@ def setup_mariadb():
             run_cmd(f"mariadb-install-db --datadir='{data_dir}'")
             print("\033[1;32m [✓] MariaDB database initialized. \033[0m")
 
-        if command_exists("mariadbd-safe"):
-            cmd = f"mariadbd-safe --datadir='{data_dir}' --socket='{sock_path}'"
-        else:
-            cmd = f"mariadbd --datadir='{data_dir}' --socket='{sock_path}'"
-
+        # --- Launch bare mariadbd (no supervisor) ---
+        cmd = f"mariadbd --datadir='{data_dir}' --socket='{sock_path}'"
         subprocess.Popen(cmd, shell=True,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -122,9 +154,27 @@ def setup_mariadb():
             run_cmd(f"mysql -u root --socket='{sock_path}' -e \"{sec_sql}\"")
             print("\033[1;32m [✓] MariaDB Security Hardening applied. \033[0m")
 
-        # Graceful shutdown (avoids data corruption)
+        # --- Graceful shutdown ---
         run_cmd(f"mysqladmin --socket='{sock_path}' shutdown")
+        time.sleep(2)
+
+        # --- Belt-and-braces cleanup: kill any supervisor FIRST ---
+        # (otherwise it would respawn mariadbd right after we kill it)
+        for pattern in ("mariadbd-safe", "mysqld_safe"):
+            run_cmd(f"pkill -TERM -f '{pattern}'")
         time.sleep(1)
+        for pattern in ("mariadbd-safe", "mysqld_safe", "mariadbd", "mysqld"):
+            run_cmd(f"pkill -TERM -f '{pattern}'")
+        time.sleep(1)
+        for pattern in ("mariadbd-safe", "mysqld_safe", "mariadbd", "mysqld"):
+            run_cmd(f"pkill -KILL -f '{pattern}'")
+
+        # --- Verify clean shutdown ---
+        if is_process_running("mariadbd") or is_process_running("mysqld"):
+            print("\033[1;33m [!] Warning: MariaDB still running after shutdown.\033[0m")
+        else:
+            print("\033[1;32m [✓] MariaDB stopped cleanly (no supervisors left). \033[0m")
+
         return True
     except Exception as e:
         print(f"\033[1;31m [!] MariaDB init error: {e}\033[0m")
@@ -166,8 +216,6 @@ def setup_php_fpm():
         PHP_FPM_DIR.mkdir(parents=True, exist_ok=True)
         www_conf = PHP_FPM_DIR / "www.conf"
 
-        # NOTE: user/group directives are NOT set because Termux has no real
-        # root and PHP-FPM will run as the current app user anyway.
         conf_content = """\
 [www]
 listen = 127.0.0.1:9000
@@ -231,7 +279,6 @@ IP.2 = ::1
         run_cmd(f"openssl req -x509 -nodes -days 365 -newkey rsa:2048 "
                 f"-keyout '{key_path}' -out '{cert_path}' -config '{openssl_cnf}'")
 
-        # Tighten private key perms
         try:
             os.chmod(key_path, 0o600)
             os.chmod(SSL_DIR, 0o700)
@@ -264,11 +311,9 @@ http {{
     sendfile on;
     keepalive_timeout 65;
 
-    # Logging
     access_log {PREFIX}/var/log/nginx-access.log;
     error_log  {PREFIX}/var/log/nginx-error.log;
 
-    # Gzip
     gzip on;
     gzip_comp_level 5;
     gzip_min_length 256;
@@ -279,17 +324,11 @@ http {{
         application/xml+rss application/x-font-ttf font/opentype
         image/svg+xml;
 
-    # Rate limit zone for /phpmyadmin
     limit_req_zone $binary_remote_addr zone=pma_zone:10m rate=10r/m;
 
-    # Upstream PHP-FPM
     upstream php_fpm {{
         server 127.0.0.1:9000;
     }}
-
-    # Common PHP handler (uses try_files to prevent path traversal)
-    # Included inline in each server block via a map is not possible here,
-    # so we duplicate the safe block in each server.
 
     server {{
         listen 8080;
@@ -298,27 +337,22 @@ http {{
         root {HTDOCS_DIR};
         index index.php index.html index.htm;
 
-        # Security headers
         add_header X-Frame-Options "SAMEORIGIN" always;
         add_header X-Content-Type-Options "nosniff" always;
         add_header Referrer-Policy "strict-origin-when-cross-origin" always;
 
-        # Default routing (WordPress-friendly by default)
         location / {{
             try_files $uri $uri/ /index.php?$args;
         }}
 
-        # Laravel-style routing
         location ~ ^/laravel/ {{
             try_files $uri $uri/ /laravel/public/index.php?$query_string;
         }}
 
-        # Nextcloud routing
         location ~ ^/nextcloud/ {{
             try_files $uri $uri/ /nextcloud/index.php$request_uri;
         }}
 
-        # phpMyAdmin with rate limiting
         location ~ ^/phpmyadmin/.*\\.php$ {{
             limit_req zone=pma_zone burst=5 nodelay;
             try_files $uri =404;
@@ -331,7 +365,6 @@ http {{
             fastcgi_read_timeout 300;
         }}
 
-        # Generic PHP (with =404 fallback -> prevents path traversal)
         location ~ \\.php$ {{
             try_files $uri =404;
             fastcgi_pass php_fpm;
@@ -343,7 +376,6 @@ http {{
             fastcgi_read_timeout 300;
         }}
 
-        # Block hidden files
         location ~ /\\. {{
             deny all;
         }}
@@ -411,7 +443,6 @@ http {{
 """
         conf_path.write_text(nginx_config)
 
-        # Ensure log dir exists
         (PREFIX / "var/log").mkdir(parents=True, exist_ok=True)
         print("\033[1;32m [✓] Nginx configured (security headers, rate limiting, gzip). \033[0m")
         return True
@@ -421,7 +452,7 @@ http {{
 
 
 # ---------------------------------------------------------------------------
-# php.ini
+# php.ini  (no manual extension= lines -> relies on conf.d auto-loading)
 # ---------------------------------------------------------------------------
 def create_php_ini():
     php_ini_path = get_php_ini_path()
@@ -450,21 +481,23 @@ session.cookie_lifetime = 0
 session.cookie_path = /
 session.gc_maxlifetime = 1440
 
-; Enable extensions
-extension=mysqli
-extension=pdo_mysql
-extension=mbstring
-extension=openssl
-extension=curl
-extension=zip
-extension=gd
-extension=intl
-extension=bcmath
+; NOTE: Extensions are auto-loaded from $PREFIX/etc/php/conf.d/*.ini
+; (installed by the php-* packages). Do NOT add `extension=` lines here,
+; otherwise PHP warns when the corresponding .so is missing.
 """
     try:
         php_ini_path.parent.mkdir(parents=True, exist_ok=True)
         php_ini_path.write_text(php_ini_content)
         print(f"\033[1;32m [✓] php.ini updated at {php_ini_path}. \033[0m")
+
+        # --- Report missing extensions with an install hint ---
+        missing = [ext for ext in PHP_EXT_PACKAGES if not php_ext_installed(ext)]
+        if missing:
+            pkgs = " ".join(PHP_EXT_PACKAGES[m] for m in missing)
+            print(f"\033[1;33m [!] Missing PHP extensions: {', '.join(missing)}\033[0m")
+            print(f"\033[1;33m     Install with: pkg install {pkgs}\033[0m")
+        else:
+            print("\033[1;32m [✓] All recommended PHP extensions detected. \033[0m")
         return True
     except Exception as e:
         print(f"\033[1;31m [!] php.ini error: {e}\033[0m")
@@ -527,7 +560,6 @@ def install_phpmyadmin():
         if saved_config:
             config_file.write_text(saved_config)
         elif config_sample.exists():
-            # Cryptographically secure secret
             secret = secrets.token_hex(16)
             content = config_sample.read_text()
             content = re.sub(
@@ -535,7 +567,6 @@ def install_phpmyadmin():
                 f"$cfg['blowfish_secret'] = '{secret}';",
                 content,
             )
-            # SECURITY: never allow empty password over the network
             content = re.sub(
                 r"\$cfg\['Servers'\]\[\$i\]\['AllowNoPassword'\]\s*=\s*true;",
                 "$cfg['Servers'][$i]['AllowNoPassword'] = false;",
@@ -739,19 +770,22 @@ stop_services() {{
     fi
     echo -e "\033[1;33m[*] Stopping all services (graceful)...\033[0m"
 
-    # Graceful MariaDB shutdown
+    # --- MariaDB: graceful shutdown, then kill supervisors FIRST ---
     if [ -S "$MARIADB_SOCKET" ]; then
         mysqladmin --socket="$MARIADB_SOCKET" shutdown 2>/dev/null
         sleep 2
     fi
+    # Supervisors FIRST (otherwise they restart mariadbd right away)
+    pkill -TERM -f "mariadbd-safe" > /dev/null 2>&1
+    pkill -TERM -f "mysqld_safe"   > /dev/null 2>&1
+    sleep 1
+    pkill -TERM -f "mariadbd|mysqld" > /dev/null 2>&1
+    sleep 1
+    pkill -KILL -f "mariadbd|mysqld" > /dev/null 2>&1
 
     pkill -f nginx > /dev/null 2>&1
     pkill -f php-fpm > /dev/null 2>&1
     pkill -f redis-server > /dev/null 2>&1
-    # Force only if still alive
-    pgrep -f "mariadbd|mysqld" > /dev/null && pkill -TERM -f "mariadbd|mysqld" > /dev/null 2>&1
-    sleep 1
-    pgrep -f "mariadbd|mysqld" > /dev/null && pkill -KILL -f "mariadbd|mysqld" > /dev/null 2>&1
 
     echo -e "\033[1;31m[OK] All services stopped safely.\033[0m"
     sleep 1
@@ -997,7 +1031,6 @@ update_server() {{
         echo -e "\n\033[1;35m[!] New version ($REMOTE_VER) available!\033[0m"
         echo -e "\033[1;33m[*] Changelog:\033[0m"
 
-        # Write a small temp parser to avoid shell injection
         PARSER="$PREFIX/tmp/myserver_changelog_parser.py"
         cat > "$PARSER" <<'PYEOF'
 import ast, re, sys
@@ -1230,10 +1263,9 @@ done
 # ---------------------------------------------------------------------------
 def cleanup_repository():
     """Only delete the CWD if we are CERTAIN it is a freshly-cloned copy
-    of the myserver repo (identified by BOTH install_server.py AND a marker)."""
+    of the myserver repo."""
     try:
         cwd = Path.cwd().resolve()
-        # Never delete these
         forbidden = {HOME, PREFIX, Path('/'), Path('/data'),
                      Path('/data/data'), Path('/data/data/com.termux'),
                      Path('/data/data/com.termux/files')}
@@ -1242,11 +1274,9 @@ def cleanup_repository():
 
         install_py = cwd / "install_server.py"
         git_dir = cwd / ".git"
-        # Require BOTH the installer script AND a remote pointing to the repo
         if not install_py.exists() or not git_dir.exists():
             return
 
-        # Verify git remote matches our repo
         try:
             result = subprocess.run(
                 ["git", "-C", str(cwd), "remote", "-v"],
@@ -1272,12 +1302,18 @@ def main():
     try:
         print(f"\033[1;33m[+] Deploying Advanced Nginx + PHP-FPM Server Stack v{CURRENT_VERSION}...\033[0m")
 
+        # Build the pkg install line with all PHP extension packages
+        php_ext_pkgs = " ".join(sorted(set(PHP_EXT_PACKAGES.values())))
+        core_pkgs = (
+            "nginx php php-fpm mariadb redis openssl-tool "
+            "curl tar unzip git wget cloudflared"
+        )
+        install_cmd = f"pkg install -y {core_pkgs} {php_ext_pkgs}"
+
         steps = [
             ("Updating Packages", "pkg update -y"),
             ("Storage Setup", None),
-            ("Installing Core Software",
-             "pkg install -y nginx php php-fpm mariadb redis openssl-tool "
-             "curl tar unzip git wget cloudflared"),
+            ("Installing Core Software", install_cmd),
             ("MariaDB Hardened Initialization", setup_mariadb),
             ("Redis Setup", setup_redis),
             ("PHP-FPM Configuration", setup_php_fpm),
@@ -1307,6 +1343,13 @@ def main():
                    if not command_exists(c)]
         if missing:
             print(f"\033[1;33m [!] Warning: missing binaries: {', '.join(missing)}\033[0m")
+
+        # Final MariaDB state verification
+        if is_process_running("mariadbd") or is_process_running("mysqld"):
+            print("\033[1;33m [!] Notice: MariaDB left running after install — "
+                  "run 'myserver stop' to halt it.\033[0m")
+        else:
+            print("\033[1;32m [✓] MariaDB is stopped (ready for 'myserver start').\033[0m")
 
         print("\n\033[1;32m[✓] Server Stack Deployed Successfully!\033[0m")
         print(f"\033[1;36mWeb Root: {HTDOCS_DIR}\033[0m")
