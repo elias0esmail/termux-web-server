@@ -10,8 +10,9 @@ import secrets
 import getpass
 from pathlib import Path
 
-CURRENT_VERSION = "2.19.6"
+CURRENT_VERSION = "2.19.7"
 CHANGELOG = [
+    "Fix: stop_services now reliably kills Nginx/Redis/PHP-FPM (3-stage termination)",
     "Fix: Do not delete MariaDB socket while server is running",
     "Fix: Preserve executable bit on htdocs files",
     "Fix: my.cnf password escaping for special characters",
@@ -1388,11 +1389,63 @@ start_services() {{
 stop_services() {{
     is_tunnel_running && disable_internet
     echo -e "\033[1;33m[*] Stopping all services (graceful)...\033[0m"
+
+    # --- MariaDB: shutdown via admin, then TERM, then KILL ---
     stop_mariadb_cleanly
-    pkill -x nginx > /dev/null 2>&1
-    pkill -f php-fpm > /dev/null 2>&1
-    pkill -x redis-server > /dev/null 2>&1
-    echo -e "\033[1;31m[OK] All services stopped safely.\033[0m"
+
+    # --- Nginx: graceful (-s stop) → TERM → KILL ---
+    if pgrep -f nginx > /dev/null; then
+        echo -e "\033[1;36m    - Stopping Nginx...\033[0m"
+        nginx -s stop > /dev/null 2>&1
+        sleep 1
+        if pgrep -f nginx > /dev/null; then
+            pkill -TERM -f nginx > /dev/null 2>&1
+            sleep 1
+        fi
+        if pgrep -f nginx > /dev/null; then
+            pkill -KILL -f nginx > /dev/null 2>&1
+            sleep 1
+        fi
+    fi
+
+    # --- PHP-FPM: TERM → KILL ---
+    if pgrep -f php-fpm > /dev/null; then
+        echo -e "\033[1;36m    - Stopping PHP-FPM...\033[0m"
+        pkill -TERM -f php-fpm > /dev/null 2>&1
+        sleep 1
+        if pgrep -f php-fpm > /dev/null; then
+            pkill -KILL -f php-fpm > /dev/null 2>&1
+            sleep 1
+        fi
+    fi
+
+    # --- Redis: redis-cli shutdown → TERM → KILL ---
+    if pgrep -f redis-server > /dev/null; then
+        echo -e "\033[1;36m    - Stopping Redis...\033[0m"
+        redis-cli -h 127.0.0.1 -p 6379 shutdown nosave > /dev/null 2>&1
+        sleep 1
+        if pgrep -f redis-server > /dev/null; then
+            pkill -TERM -f redis-server > /dev/null 2>&1
+            sleep 1
+        fi
+        if pgrep -f redis-server > /dev/null; then
+            pkill -KILL -f redis-server > /dev/null 2>&1
+            sleep 1
+        fi
+    fi
+
+    # --- Final verification ---
+    local left=0
+    pgrep -f nginx > /dev/null && {{ echo -e "\033[1;31m[!] Nginx still running!\033[0m"; left=1; }}
+    pgrep -f php-fpm > /dev/null && {{ echo -e "\033[1;31m[!] PHP-FPM still running!\033[0m"; left=1; }}
+    pgrep -f redis-server > /dev/null && {{ echo -e "\033[1;31m[!] Redis still running!\033[0m"; left=1; }}
+    pgrep -x mariadbd > /dev/null && {{ echo -e "\033[1;31m[!] MariaDB still running!\033[0m"; left=1; }}
+
+    if [ $left -eq 0 ]; then
+        echo -e "\033[1;32m[OK] All services stopped safely.\033[0m"
+    else
+        echo -e "\033[1;33m[!] Some services refused to stop — try again or check ps.\033[0m"
+    fi
     sleep 1
 }}
 
