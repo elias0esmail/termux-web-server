@@ -12,7 +12,7 @@ import getpass
 from pathlib import Path
 
 # Current Version & Release Notes
-CURRENT_VERSION = "2.18.0"
+CURRENT_VERSION = "2.18.1"
 CHANGELOG = [
     "Fix: Clean arrow-key menu (no repeated prompt printing, no full paths)",
     "Fix: phpMyAdmin 503 — removed aggressive rate limit on /phpmyadmin",
