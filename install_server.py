@@ -10,10 +10,10 @@ import secrets
 import getpass
 from pathlib import Path
 
-CURRENT_VERSION = "2.19.4"
+CURRENT_VERSION = "2.19.5"
 CHANGELOG = [
-    "New: Quickstart hidden when server is stopped (prevents DB-less installs)",
-    "New: 'myserver quickstart' checks server status first",
+    "Improvement: Password prompt retries infinitely on mismatch",
+    "New: (carried) Quickstart hidden when server is stopped",
     "Fix: (carried) MariaDB normal auth (no more ERROR 1698)",
     "Fix: (carried) Auto-repair broken unix_socket root auth",
     "Fix: (carried) fzf clean menu rendering",
@@ -171,22 +171,35 @@ def ask_web_root_location() -> Path:
 
 
 def ask_db_password() -> str:
+    """
+    Prompt for MariaDB root password. Empty = no password.
+    On mismatch, show error and re-prompt indefinitely
+    (until the user enters matching passwords or presses Ctrl+C to abort).
+    """
     print("\033[1;36m[i] MariaDB root password\033[0m")
     print("\033[1;33m    Leave empty and press Enter for NO password (default)\033[0m")
-    try:
-        pw = getpass.getpass("\033[1;33m  Password: \033[0m").strip()
-    except Exception:
-        pw = ""
-    if not pw:
-        return ""
-    try:
-        confirm = getpass.getpass("\033[1;33m  Confirm : \033[0m").strip()
-    except Exception:
-        confirm = pw
-    if pw != confirm:
-        print("\033[1;31m [!] Passwords do not match. Using NO password.\033[0m")
-        return ""
-    return pw
+
+    while True:
+        try:
+            pw = getpass.getpass("\033[1;33m  Password: \033[0m").strip()
+        except Exception:
+            pw = ""
+
+        # Empty = no password → accept immediately
+        if not pw:
+            return ""
+
+        try:
+            confirm = getpass.getpass("\033[1;33m  Confirm : \033[0m").strip()
+        except Exception:
+            confirm = ""
+
+        if pw == confirm:
+            return pw
+
+        # Mismatch → error + retry
+        print("\033[1;31m [!] Passwords do not match. Please try again.\033[0m")
+        print()
 
 
 # ===========================================================================
@@ -1294,8 +1307,6 @@ disable_internet() {{
 }}
 
 quickstart_menu() {{
-    # SAFETY: quickstart requires the server to be running so MariaDB
-    # is available for database creation.
     if ! server_is_running; then
         echo -e "\033[1;31m[!] The server is not running.\033[0m"
         echo -e "\033[1;33m    Please start it first: myserver start\033[0m"
@@ -1577,7 +1588,6 @@ while true; do
     fi
 
     if [ "$SERVER_RUNNING" -eq 1 ]; then
-        # ====== RUNNING MENU ======
         echo -e "\033[1;33mSelect an option:\033[0m"
         echo -e "\033[1;33m 1) stop             (Stop all services)\033[0m"
         is_tunnel_running && echo -e "\033[1;33m 2) Disable Internet (disable internet access)\033[0m" || echo -e "\033[1;33m 2) Enable Internet  (enable internet access)\033[0m"
@@ -1603,7 +1613,6 @@ while true; do
             *) echo -e "\033[1;31mInvalid.\033[0m"; sleep 1 ;;
         esac
     else
-        # ====== STOPPED MENU (no quickstart) ======
         echo -e "\033[1;33mSelect an option:\033[0m"
         echo -e "\033[1;33m 1) start            (Start all services)\033[0m"
         echo -e "\033[1;33m 2) refresh status   (Re-check server status)\033[0m"
