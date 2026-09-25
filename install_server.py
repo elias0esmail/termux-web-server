@@ -11,18 +11,19 @@ import string
 from pathlib import Path
 
 # Current Version & Release Notes
-CURRENT_VERSION = "2.13.0"
+CURRENT_VERSION = "2.14.0"
 CHANGELOG = [
-    "Fix: PHP extension warnings via conf.d auto-generated .ini files",
-    "Fix: Auto-clean legacy 'extension=' lines from php.ini",
-    "Fix: Explicit extension_dir set in php.ini",
-    "Fix: Remove stale conf.d .ini for extensions no longer installed",
-    "Improvement: Post-install extension inventory report",
-    "Improvement: Startup php.ini hygiene check before install",
-    "Security: (carried) PHP path traversal fix (try_files =404)",
-    "Security: (carried) phpMyAdmin AllowNoPassword disabled",
+    "Fix: Removed non-existent Termux packages (php-mysqli, php-pdo-mysql, php-intl, php-bcmath)",
+    "Fix: Separate .so detection list from installable package list",
+    "Fix: Built-in extensions (mysqli, pdo_mysql, openssl) auto-detected from .so",
+    "Improvement: Only suggest packages that actually exist in Termux repos",
+    "Improvement: sync_php_extensions auto-syncs all .so on every start",
+    "Improvement: Clearer final report (all present vs missing list)",
+    "Fix: (carried) PHP extension warnings via conf.d auto-generated .ini files",
+    "Fix: (carried) Auto-clean legacy 'extension=' lines from php.ini",
+    "Fix: (carried) Explicit extension_dir set in php.ini",
+    "Security: (carried) PHP path traversal fix + phpMyAdmin AllowNoPassword OFF",
     "Fix: (carried) MariaDB stopped cleanly after installation",
-    "Fix: (carried) Graceful shutdown kills supervisors first",
 ]
 
 # System and Environment Paths
@@ -40,17 +41,33 @@ REPO_DIR = Path(__file__).resolve().parent
 
 GITHUB_RAW_URL = "https://raw.githubusercontent.com/elias0esmail/termux-web-server/main"
 
-# PHP extensions that live in separate Termux packages
+# ---------------------------------------------------------------------------
+# PHP extension inventory
+# ---------------------------------------------------------------------------
+# Extensions to LOOK FOR as .so files in $PREFIX/lib/php/.
+# Some of them (mysqli, pdo_mysql, openssl) are BUILT INTO the main 'php'
+# package in Termux and do NOT have their own installable package.
+PHP_EXT_SO_NAMES = [
+    "mysqli",
+    "pdo_mysql",
+    "mbstring",
+    "openssl",
+    "curl",
+    "zip",
+    "gd",
+    "xml",
+    "intl",
+    "bcmath",
+]
+
+# Only extensions whose Termux packages ACTUALLY EXIST in the repos.
+# Used solely to generate user-facing "pkg install ..." hints.
 PHP_EXT_PACKAGES = {
-    "mysqli":     "php-mysqli",
-    "pdo_mysql":  "php-pdo-mysql",
-    "mbstring":   "php-mbstring",
-    "openssl":    "php-openssl",
-    "curl":       "php-curl",
-    "zip":        "php-zip",
-    "gd":         "php-gd",
-    "intl":       "php-intl",
-    "bcmath":     "php-bcmath",
+    "gd":       "php-gd",
+    "curl":     "php-curl",
+    "mbstring": "php-mbstring",
+    "zip":      "php-zip",
+    "xml":      "php-xml",
 }
 
 
@@ -74,8 +91,6 @@ def get_php_ini_path() -> Path:
     try:
         result = subprocess.run(["php", "--ini"], capture_output=True, text=True)
         if result.returncode == 0:
-            # Output can contain multiple lines (warnings + paths). Find the
-            # one that looks like a real path and ends with php.ini
             for line in result.stdout.splitlines():
                 line = line.strip()
                 if line.endswith("php.ini") and line.startswith("/"):
@@ -129,7 +144,6 @@ def clean_php_ini_legacy(ini_path: Path) -> int:
     except Exception:
         return 0
 
-    # Match lines like: extension=foo  or  extension=foo.so  (not commented)
     new_content, n = re.subn(
         r"^[ \t]*extension[ \t]*=[ \t]*[^\r\n]*[\r\n]?",
         "",
@@ -491,6 +505,7 @@ def create_php_ini():
     3. Generate per-extension .ini files in conf.d for every .so that
        actually exists on disk.
     4. Remove stale conf.d .ini files for extensions that are gone.
+    5. Report ONLY truly missing installable packages (php-gd, etc.).
     """
     php_ini_path = get_php_ini_path()
     PHP_CONFD_DIR.mkdir(parents=True, exist_ok=True)
@@ -538,13 +553,11 @@ session.gc_maxlifetime = 1440
         print(f"\033[1;31m [!] php.ini error: {e}\033[0m")
         return False
 
-    # --- 3. Regenerate conf.d .ini files ---
+    # --- 3. Regenerate conf.d .ini files for EXISTING .so files only ---
     installed_exts = []
-    missing_exts = []
-    for ext in PHP_EXT_PACKAGES:
+    for ext in PHP_EXT_SO_NAMES:
         ini_file = PHP_CONFD_DIR / f"{ext}.ini"
         if php_ext_so_exists(ext):
-            # Write or refresh
             desired = f"extension={ext}.so\n"
             try:
                 if not ini_file.exists() or ini_file.read_text() != desired:
@@ -559,14 +572,23 @@ session.gc_maxlifetime = 1440
                     ini_file.unlink()
             except Exception:
                 pass
-            missing_exts.append(ext)
 
     if installed_exts:
         print(f"\033[1;32m [✓] Enabled PHP extensions: {', '.join(installed_exts)} \033[0m")
-    if missing_exts:
-        pkgs = " ".join(PHP_EXT_PACKAGES[m] for m in missing_exts)
-        print(f"\033[1;33m [!] Missing PHP extensions: {', '.join(missing_exts)}\033[0m")
-        print(f"\033[1;33m     Install with: pkg install {pkgs}\033[0m")
+    else:
+        print("\033[1;33m [!] No PHP extension .so files detected in lib/php \033[0m")
+
+    # --- 4. Report only truly missing packages (that actually exist in repos) ---
+    missing_pkgs = sorted({
+        pkg for ext, pkg in PHP_EXT_PACKAGES.items()
+        if not php_ext_so_exists(ext)
+    })
+
+    if missing_pkgs:
+        print(f"\033[1;33m [!] Optional PHP extensions not installed: {', '.join(missing_pkgs)}\033[0m")
+        print(f"\033[1;33m     To install: pkg install {' '.join(missing_pkgs)}\033[0m")
+    else:
+        print("\033[1;32m [✓] All recommended PHP extensions are present. \033[0m")
 
     return True
 
@@ -718,9 +740,9 @@ has_internet() {{
 
 sync_php_extensions() {{
     # Regenerate conf.d/*.ini based on actual .so presence.
-    # This keeps PHP silent (no startup warnings) after package changes.
+    # Keeps PHP silent (no startup warnings) after any package change.
     mkdir -p "$PHP_CONFD_DIR"
-    for ext in mysqli pdo_mysql mbstring openssl curl zip gd intl bcmath; do
+    for ext in mysqli pdo_mysql mbstring openssl curl zip gd xml intl bcmath; do
         if [ -f "$PHP_LIB_DIR/$ext.so" ]; then
             echo "extension=$ext.so" > "$PHP_CONFD_DIR/$ext.ini"
         else
@@ -1223,7 +1245,7 @@ uninstall_server() {{
             rm -f "$TUNNEL_PID_FILE" "$TUNNEL_URL_FILE" "$TUNNEL_LOG"
 
             # Remove generated conf.d files (only ours)
-            for ext in mysqli pdo_mysql mbstring openssl curl zip gd intl bcmath; do
+            for ext in mysqli pdo_mysql mbstring openssl curl zip gd xml intl bcmath; do
                 rm -f "$PHP_CONFD_DIR/$ext.ini"
             done
 
@@ -1395,6 +1417,7 @@ def main():
             if removed:
                 print(f"\033[1;33m [*] Pre-flight: removed {removed} legacy 'extension=' line(s) from php.ini \033[0m")
 
+        # Only install packages that ACTUALLY EXIST in Termux repos
         php_ext_pkgs = " ".join(sorted(set(PHP_EXT_PACKAGES.values())))
         core_pkgs = (
             "nginx php php-fpm mariadb redis openssl-tool "
