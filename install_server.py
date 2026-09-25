@@ -7,21 +7,17 @@ import shutil
 import re
 import subprocess
 import secrets
-import string
 import getpass
 from pathlib import Path
 
-# Current Version & Release Notes
-CURRENT_VERSION = "2.18.2"
+CURRENT_VERSION = "2.19.0"
 CHANGELOG = [
-    "Fix: Arrow-key menu now uses fzf (bullet-proof, no repeated printing)",
-    "Fix: Menu selection highlighted in cyan; short labels only",
-    "New: fzf auto-installed with core packages",
-    "Fix: (carried) phpMyAdmin 503 — no rate limit on /phpmyadmin",
-    "New: (carried) phpMyAdmin config storage auto-setup",
-    "New: (carried) Auto-open http://localhost:8080 on 'myserver start'",
-    "Fix: (carried) Nginx FUSE-safe directory handling",
-    "Security: (carried) PHP path traversal fix + AllowNoPassword logic",
+    "Fix: Use `mariadb`/`mariadb-admin` (no more deprecation warnings)",
+    "Fix: phpMyAdmin storage import uses --force + better diagnostics",
+    "New: Uninstall drops all user databases + wipes MariaDB data dir + removes htdocs",
+    "New: Reinstall/update preserves databases, password, htdocs; only refreshes phpMyAdmin",
+    "New: Reinstall mode auto-detected (no password prompt, uses ~/.my.cnf)",
+    "Fix: (carried) fzf menu, Nginx FUSE-safe, phpMyAdmin 503, storage auto-setup",
 ]
 
 PREFIX = Path(os.environ.get('PREFIX', '/data/data/com.termux/files/usr'))
@@ -39,31 +35,33 @@ TMP_DIR = PREFIX / "tmp"
 VERSION_FILE = PREFIX / "etc/myserver_version"
 REPO_DIR = Path(__file__).resolve().parent
 MY_CNF_FILE = HOME / ".my.cnf"
+MYSQL_DATA_DIR = PREFIX / "var/lib/mysql"
+MYSQL_RUN_DIR = PREFIX / "var/run/mysqld"
+MARIADB_SOCKET = MYSQL_RUN_DIR / "mysqld.sock"
 
 GITHUB_RAW_URL = "https://raw.githubusercontent.com/elias0esmail/termux-web-server/main"
 
 DB_ROOT_PASSWORD = ""
+REINSTALL_MODE = False  # set to True if existing installation detected
 
 PHP_EXPECTED_EXTENSIONS = [
     "mysqli", "pdo_mysql", "mbstring", "openssl",
     "curl", "zip", "xml", "intl", "bcmath",
     "gd", "sodium", "redis", "apcu", "imagick",
 ]
-
 PHP_BUILTIN_EXTENSIONS = {
     "mysqli", "pdo_mysql", "mbstring", "openssl",
     "curl", "zip", "xml", "intl", "bcmath",
 }
-
 PHP_EXT_PACKAGES = {
-    "gd":      "php-gd",
-    "sodium":  "php-sodium",
-    "redis":   "php-redis",
-    "apcu":    "php-apcu",
-    "imagick": "php-imagick",
+    "gd": "php-gd", "sodium": "php-sodium", "redis": "php-redis",
+    "apcu": "php-apcu", "imagick": "php-imagick",
 }
 
 
+# ===========================================================================
+# Helpers
+# ===========================================================================
 def run_cmd(cmd, check=False):
     return subprocess.run(cmd, shell=True, check=check,
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -79,78 +77,57 @@ def is_process_running(pattern: str) -> bool:
     return r.returncode == 0
 
 
-# ---------------------------------------------------------------------------
-# Interactive arrow-key menu via fzf
-# ---------------------------------------------------------------------------
+def mysql_client() -> str:
+    """Return the preferred client binary (mariadb > mysql)."""
+    return "mariadb" if command_exists("mariadb") else "mysql"
+
+
+def mysql_admin() -> str:
+    """Return the preferred admin binary (mariadb-admin > mysqladmin)."""
+    return "mariadb-admin" if command_exists("mariadb-admin") else "mysqladmin"
+
+
+# ===========================================================================
+# fzf menu
+# ===========================================================================
 def ensure_fzf() -> bool:
-    """Make sure fzf is installed. Returns True if available."""
     if command_exists("fzf"):
         return True
     print("\033[1;33m[*] Installing fzf (one-time)...\033[0m")
     r = subprocess.run("pkg install -y fzf", shell=True,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    if r.returncode == 0 and command_exists("fzf"):
-        print("\033[1;32m [✓] fzf installed. \033[0m")
-        return True
-    return False
+    return r.returncode == 0 and command_exists("fzf")
 
 
 def choose_option(title: str, options: list, default: int = 0) -> int:
-    """
-    Show an interactive arrow-key menu using fzf.
-
-    - Options are prefixed with a hidden index ("N\\tlabel") and passed
-      via stdin. fzf hides the prefix with --with-nth=2.. and returns the
-      full chosen line; we parse the index back.
-
-    - If fzf is not available, falls back to numeric input.
-    """
     if not options:
         return 0
     if len(options) == 1:
         return 0
-
     if ensure_fzf():
-        # Build stdin: "INDEX<TAB>LABEL", one per line.
-        # Put default option first so fzf starts focused on it.
         lines = [f"{i}\t{opt}" for i, opt in enumerate(options)]
         reordered = [lines[default]] + [l for i, l in enumerate(lines) if i != default]
         input_text = "\n".join(reordered) + "\n"
-
         try:
             result = subprocess.run(
-                [
-                    "fzf",
-                    "--height=40%",
-                    "--reverse",
-                    "--no-multi",
-                    "--no-info",
-                    "--with-nth=2..",            # hide the "N\t" prefix
-                    "--delimiter=\t",
-                    "--header=" + title,
-                    "--pointer=❯",
-                    "--prompt=  ",
-                    "--color=pointer:cyan,fg+:cyan,header:yellow",
-                ],
-                input=input_text,
-                capture_output=True,
-                text=True,
-            )
+                ["fzf", "--height=40%", "--reverse", "--no-multi", "--no-info",
+                 "--with-nth=2..", "--delimiter=\t",
+                 "--header=" + title, "--pointer=❯", "--prompt=  ",
+                 "--color=pointer:cyan,fg+:cyan,header:yellow"],
+                input=input_text, capture_output=True, text=True)
             if result.returncode != 0 or not result.stdout.strip():
                 return default
-            chosen_line = result.stdout.strip()
-            idx_str = chosen_line.split("\t", 1)[0]
+            idx_str = result.stdout.strip().split("\t", 1)[0]
             try:
                 idx = int(idx_str)
                 if 0 <= idx < len(options):
                     return idx
             except ValueError:
                 pass
-            return default
         except Exception:
-            return default
-
-    # --- Fallback: numeric input ---
+            pass
+        return default
+    # Fallback
     print(f"\033[1;36m{title}\033[0m")
     for i, opt in enumerate(options, 1):
         marker = "❯" if i - 1 == default else " "
@@ -166,18 +143,12 @@ def choose_option(title: str, options: list, default: int = 0) -> int:
 
 
 def ask_web_root_location() -> Path:
-    """Prompt user to choose the web root directory."""
     home_path = HOME / "htdocs"
     storage_path = HOME / "storage/shared/htdocs"
-
     idx = choose_option(
         "Where should the web root (htdocs) be created?",
-        [
-            "Termux home",
-            "Phone storage",
-        ],
-        default=0,
-    )
+        ["Termux home", "Phone storage"],
+        default=0)
     return home_path if idx == 0 else storage_path
 
 
@@ -200,9 +171,9 @@ def ask_db_password() -> str:
     return pw
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # .my.cnf helpers
-# ---------------------------------------------------------------------------
+# ===========================================================================
 def _sql_escape(s: str) -> str:
     return s.replace("\\", "\\\\").replace("'", "\\'")
 
@@ -219,9 +190,25 @@ def write_my_cnf(password: str, sock_path: Path):
         pass
 
 
-# ---------------------------------------------------------------------------
+def read_password_from_my_cnf() -> str:
+    """Return the password from ~/.my.cnf, or '' if not set."""
+    if not MY_CNF_FILE.exists():
+        return ""
+    try:
+        for line in MY_CNF_FILE.read_text().splitlines():
+            line = line.strip()
+            if line.startswith("password"):
+                _, _, val = line.partition("=")
+                val = val.strip().strip('"').strip("'")
+                return val
+    except Exception:
+        pass
+    return ""
+
+
+# ===========================================================================
 # PHP introspection
-# ---------------------------------------------------------------------------
+# ===========================================================================
 def get_php_ini_path() -> Path:
     try:
         result = subprocess.run(["php", "--ini"], capture_output=True, text=True)
@@ -232,11 +219,7 @@ def get_php_ini_path() -> Path:
                     return Path(line)
     except Exception:
         pass
-    for candidate in [
-        PREFIX / "etc/php/php.ini",
-        PREFIX / "lib/php.ini",
-        PREFIX / "etc/php.ini",
-    ]:
+    for candidate in [PREFIX / "etc/php/php.ini", PREFIX / "lib/php.ini", PREFIX / "etc/php.ini"]:
         if candidate.exists():
             return candidate
     return PREFIX / "etc/php/php.ini"
@@ -244,14 +227,10 @@ def get_php_ini_path() -> Path:
 
 def php_loaded_extensions() -> set:
     try:
-        r = subprocess.run(["php", "-m"], capture_output=True,
-                           text=True, timeout=15)
+        r = subprocess.run(["php", "-m"], capture_output=True, text=True, timeout=15)
         if r.returncode == 0:
-            return {
-                ln.strip().lower()
-                for ln in r.stdout.splitlines()
-                if ln.strip() and not ln.strip().startswith("[")
-            }
+            return {ln.strip().lower() for ln in r.stdout.splitlines()
+                    if ln.strip() and not ln.strip().startswith("[")}
     except Exception:
         pass
     return set()
@@ -259,10 +238,8 @@ def php_loaded_extensions() -> set:
 
 def php_extension_dir() -> Path:
     try:
-        r = subprocess.run(
-            ["php", "-n", "-r", 'echo ini_get("extension_dir");'],
-            capture_output=True, text=True, timeout=5
-        )
+        r = subprocess.run(["php", "-n", "-r", 'echo ini_get("extension_dir");'],
+                           capture_output=True, text=True, timeout=5)
         if r.returncode == 0 and r.stdout.strip():
             lines = [ln.strip() for ln in r.stdout.strip().splitlines() if ln.strip()]
             if lines:
@@ -272,8 +249,7 @@ def php_extension_dir() -> Path:
     except Exception:
         pass
     try:
-        r = subprocess.run(["php", "-i"], capture_output=True,
-                           text=True, timeout=10)
+        r = subprocess.run(["php", "-i"], capture_output=True, text=True, timeout=10)
         if r.returncode == 0:
             for line in r.stdout.splitlines():
                 if line.lower().startswith("extension_dir"):
@@ -306,23 +282,21 @@ def clean_php_ini_legacy(ini_path: Path) -> int:
         return 0
     new_content, n = re.subn(
         r"^[ \t]*extension[ \t]*=[ \t]*[^\r\n]*[\r\n]?",
-        "", content, flags=re.MULTILINE,
-    )
+        "", content, flags=re.MULTILINE)
     if n > 0:
         ini_path.write_text(new_content)
     return n
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # Web root helpers
-# ---------------------------------------------------------------------------
+# ===========================================================================
 def enforce_htdocs_permissions() -> int:
     if not HTDOCS_DIR.exists():
         return 0
     changed = 0
     try:
-        cur = HTDOCS_DIR.stat().st_mode & 0o777
-        if cur != 0o755:
+        if (HTDOCS_DIR.stat().st_mode & 0o777) != 0o755:
             os.chmod(HTDOCS_DIR, 0o755)
             changed += 1
     except Exception:
@@ -332,8 +306,7 @@ def enforce_htdocs_permissions() -> int:
             for d in dirs:
                 p = os.path.join(root, d)
                 try:
-                    cur = os.stat(p).st_mode & 0o777
-                    if cur != 0o755:
+                    if (os.stat(p).st_mode & 0o777) != 0o755:
                         os.chmod(p, 0o755)
                         changed += 1
                 except Exception:
@@ -341,8 +314,7 @@ def enforce_htdocs_permissions() -> int:
             for f in files:
                 p = os.path.join(root, f)
                 try:
-                    cur = os.stat(p).st_mode & 0o777
-                    if cur not in (0o644, 0o755):
+                    if (os.stat(p).st_mode & 0o777) not in (0o644, 0o755):
                         os.chmod(p, 0o644)
                         changed += 1
                 except Exception:
@@ -369,7 +341,7 @@ def verify_htdocs_readable(verbose: bool = True) -> bool:
     idx = HTDOCS_DIR / "index.php"
     if not idx.exists():
         if verbose:
-            print(f"\033[1;31m [!] index.php missing in {HTDOCS_DIR} \033[0m")
+            print(f"\033[1;31m [!] index.php missing \033[0m")
         ok = False
     else:
         try:
@@ -391,51 +363,43 @@ def print_htdocs_diagnostic():
     print("\033[1;36m [i] Web root diagnostic: \033[0m")
     print(f"\033[1;36m     path      : {HTDOCS_DIR} \033[0m")
     try:
-        real = HTDOCS_DIR.resolve()
-        print(f"\033[1;36m     realpath  : {real} \033[0m")
+        print(f"\033[1;36m     realpath  : {HTDOCS_DIR.resolve()} \033[0m")
     except Exception as e:
         print(f"\033[1;33m     realpath  : (failed: {e}) \033[0m")
     if HTDOCS_DIR.exists():
         try:
-            st = HTDOCS_DIR.stat()
-            print(f"\033[1;36m     mode      : {oct(st.st_mode & 0o777)} \033[0m")
+            print(f"\033[1;36m     mode      : {oct(HTDOCS_DIR.stat().st_mode & 0o777)} \033[0m")
         except Exception:
             pass
 
 
-# ---------------------------------------------------------------------------
-# MariaDB lifecycle helpers
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# MariaDB lifecycle
+# ===========================================================================
 def start_mariadb_background():
-    data_dir = PREFIX / "var/lib/mysql"
-    run_dir = PREFIX / "var/run/mysqld"
-    data_dir.mkdir(parents=True, exist_ok=True)
-    run_dir.mkdir(parents=True, exist_ok=True)
-    sock_path = run_dir / "mysqld.sock"
-    if sock_path.exists():
+    MYSQL_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    MYSQL_RUN_DIR.mkdir(parents=True, exist_ok=True)
+    if MARIADB_SOCKET.exists():
         try:
-            sock_path.unlink()
+            MARIADB_SOCKET.unlink()
         except Exception:
             pass
-
     if command_exists("mariadbd-safe"):
-        cmd = f"mariadbd-safe --datadir='{data_dir}' --socket='{sock_path}'"
+        cmd = f"mariadbd-safe --datadir='{MYSQL_DATA_DIR}' --socket='{MARIADB_SOCKET}'"
     else:
-        cmd = f"mariadbd --datadir='{data_dir}' --socket='{sock_path}'"
+        cmd = f"mariadbd --datadir='{MYSQL_DATA_DIR}' --socket='{MARIADB_SOCKET}'"
     subprocess.Popen(cmd, shell=True,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
     for _ in range(15):
-        if sock_path.exists():
+        if MARIADB_SOCKET.exists():
             return True
         time.sleep(1)
-    return sock_path.exists()
+    return MARIADB_SOCKET.exists()
 
 
 def stop_mariadb_cleanly():
-    sock_path = PREFIX / "var/run/mysqld/mysqld.sock"
-    if sock_path.exists():
-        run_cmd(f"mysqladmin --socket='{sock_path}' shutdown")
+    if MARIADB_SOCKET.exists():
+        run_cmd(f"{mysql_admin()} --socket='{MARIADB_SOCKET}' shutdown")
         time.sleep(2)
     for pattern in ("mariadbd-safe", "mysqld_safe"):
         run_cmd(f"pkill -TERM -f '{pattern}'")
@@ -447,32 +411,36 @@ def stop_mariadb_cleanly():
         run_cmd(f"pkill -KILL -f '{pattern}'")
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # MariaDB setup
-# ---------------------------------------------------------------------------
+# ===========================================================================
 def setup_mariadb():
     try:
-        data_dir = PREFIX / "var/lib/mysql"
-        run_dir = PREFIX / "var/run/mysqld"
-        data_dir.mkdir(parents=True, exist_ok=True)
-        run_dir.mkdir(parents=True, exist_ok=True)
+        MYSQL_DATA_DIR.mkdir(parents=True, exist_ok=True)
+        MYSQL_RUN_DIR.mkdir(parents=True, exist_ok=True)
 
-        sock_path = run_dir / "mysqld.sock"
-        if sock_path.exists():
+        if MARIADB_SOCKET.exists():
             try:
-                sock_path.unlink()
+                MARIADB_SOCKET.unlink()
             except Exception:
                 pass
 
-        if not (data_dir / "mysql").exists():
-            run_cmd(f"mariadb-install-db --datadir='{data_dir}'")
+        fresh_install = not (MYSQL_DATA_DIR / "mysql").exists()
+
+        if fresh_install:
+            run_cmd(f"mariadb-install-db --datadir='{MYSQL_DATA_DIR}'")
             print("\033[1;32m [✓] MariaDB database initialized. \033[0m")
+        else:
+            print("\033[1;36m [i] Existing MariaDB data detected — preserving databases. \033[0m")
 
         if not start_mariadb_background():
             print("\033[1;31m [!] Failed to start MariaDB. \033[0m")
             return False
 
-        if sock_path.exists():
+        cli = mysql_client()
+
+        # Hardening (idempotent — safe on reinstall)
+        if MARIADB_SOCKET.exists():
             sec_sql = (
                 "DELETE FROM mysql.user WHERE User='';"
                 "DELETE FROM mysql.user WHERE User='root' AND Host NOT IN "
@@ -481,10 +449,16 @@ def setup_mariadb():
                 "DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';"
                 "FLUSH PRIVILEGES;"
             )
-            run_cmd(f"mysql -u root --socket='{sock_path}' -e \"{sec_sql}\"")
+            run_cmd(f"{cli} -u root --socket='{MARIADB_SOCKET}' -e \"{sec_sql}\"")
             print("\033[1;32m [✓] MariaDB Security Hardening applied. \033[0m")
 
-        write_my_cnf("", sock_path)
+        if REINSTALL_MODE:
+            # Keep existing credentials untouched.
+            print("\033[1;36m [i] Reinstall mode — preserving root credentials. \033[0m")
+            return True
+
+        # Fresh install: write .my.cnf and set chosen password
+        write_my_cnf("", MARIADB_SOCKET)
 
         if DB_ROOT_PASSWORD:
             tmp_sql = TMP_DIR / "myserver_setpw.sql"
@@ -494,18 +468,16 @@ def setup_mariadb():
                 f"ALTER USER 'root'@'localhost' IDENTIFIED BY '{escaped}';\n"
                 f"FLUSH PRIVILEGES;\n"
             )
-            run_cmd(f"mysql --socket='{sock_path}' < '{tmp_sql}'")
+            run_cmd(f"{cli} --socket='{MARIADB_SOCKET}' < '{tmp_sql}'")
             try:
                 tmp_sql.unlink()
             except Exception:
                 pass
-            write_my_cnf(DB_ROOT_PASSWORD, sock_path)
+            write_my_cnf(DB_ROOT_PASSWORD, MARIADB_SOCKET)
             print("\033[1;32m [✓] MariaDB root password set. \033[0m")
         else:
-            run_cmd(
-                f"mysql --socket='{sock_path}' -e "
-                f"\"ALTER USER 'root'@'localhost' IDENTIFIED BY ''; FLUSH PRIVILEGES;\""
-            )
+            run_cmd(f"{cli} --socket='{MARIADB_SOCKET}' -e "
+                    f"\"ALTER USER 'root'@'localhost' IDENTIFIED BY ''; FLUSH PRIVILEGES;\"")
             print("\033[1;36m [i] MariaDB root has no password. \033[0m")
 
         return True
@@ -514,26 +486,18 @@ def setup_mariadb():
         return False
 
 
-# ---------------------------------------------------------------------------
-# Redis
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# Redis / PHP-FPM / SSL / Nginx / php.ini / htdocs  (unchanged from 2.18.2)
+# ===========================================================================
 def setup_redis():
     try:
         redis_data = PREFIX / "var/lib/redis"
         log_dir = PREFIX / "var/log"
         redis_data.mkdir(parents=True, exist_ok=True)
         log_dir.mkdir(parents=True, exist_ok=True)
-
-        redis_conf = PREFIX / "etc/redis.conf"
-        content = (
-            f"dir {redis_data}\n"
-            "port 6379\n"
-            "bind 127.0.0.1\n"
-            "daemonize yes\n"
-            f"logfile {log_dir}/redis.log\n"
-            "ignore-warnings ARM64-COW-BUG\n"
-        )
-        redis_conf.write_text(content)
+        (PREFIX / "etc/redis.conf").write_text(
+            f"dir {redis_data}\nport 6379\nbind 127.0.0.1\ndaemonize yes\n"
+            f"logfile {log_dir}/redis.log\nignore-warnings ARM64-COW-BUG\n")
         print("\033[1;32m [✓] Redis configured (ARM64 warning suppressed). \033[0m")
         return True
     except Exception as e:
@@ -541,14 +505,10 @@ def setup_redis():
         return False
 
 
-# ---------------------------------------------------------------------------
-# PHP-FPM
-# ---------------------------------------------------------------------------
 def setup_php_fpm():
     try:
         PHP_FPM_DIR.mkdir(parents=True, exist_ok=True)
-        www_conf = PHP_FPM_DIR / "www.conf"
-        conf_content = """\
+        (PHP_FPM_DIR / "www.conf").write_text("""\
 [www]
 listen = 127.0.0.1:9000
 listen.allowed_clients = 127.0.0.1
@@ -558,8 +518,7 @@ pm.start_servers = 2
 pm.min_spare_servers = 1
 pm.max_spare_servers = 3
 pm.max_requests = 500
-"""
-        www_conf.write_text(conf_content)
+""")
         print("\033[1;32m [✓] PHP-FPM configured (Port 9000, Termux-safe). \033[0m")
         return True
     except Exception as e:
@@ -567,22 +526,17 @@ pm.max_requests = 500
         return False
 
 
-# ---------------------------------------------------------------------------
-# SSL
-# ---------------------------------------------------------------------------
 def setup_ssl():
     try:
         SSL_DIR.mkdir(parents=True, exist_ok=True)
         cert_path = SSL_DIR / "server.crt"
         key_path = SSL_DIR / "server.key"
-
         if cert_path.exists() and key_path.exists():
             try:
                 os.chmod(key_path, 0o600)
             except Exception:
                 pass
             return True
-
         openssl_cnf = SSL_DIR / "openssl.cnf"
         openssl_cnf.write_text("""\
 [req]
@@ -610,30 +564,25 @@ IP.2 = ::1
 """)
         run_cmd(f"openssl req -x509 -nodes -days 365 -newkey rsa:2048 "
                 f"-keyout '{key_path}' -out '{cert_path}' -config '{openssl_cnf}'")
-
         try:
             os.chmod(key_path, 0o600)
             os.chmod(SSL_DIR, 0o700)
         except Exception:
             pass
-
-        print("\033[1;32m [✓] Enhanced SSL Certificates generated (key chmod 600). \033[0m")
+        print("\033[1;32m [✓] SSL Certificates generated (key chmod 600). \033[0m")
         return True
     except Exception as e:
         print(f"\033[1;31m [!] SSL generation error: {e}\033[0m")
         return False
 
 
-# ---------------------------------------------------------------------------
-# Nginx
-# ---------------------------------------------------------------------------
 def setup_nginx():
     try:
         conf_path = NGINX_DIR / "nginx.conf"
         cert_path = SSL_DIR / "server.crt"
         key_path = SSL_DIR / "server.key"
 
-        common_locations = f"""\
+        common = f"""\
         location ~ ^/phpmyadmin/.*\\.php$ {{
             try_files $uri =404;
             include fastcgi_params;
@@ -685,68 +634,52 @@ http {{
     gzip_comp_level 5;
     gzip_min_length 256;
     gzip_vary on;
-    gzip_types
-        text/plain text/css text/xml text/javascript
+    gzip_types text/plain text/css text/xml text/javascript
         application/javascript application/json application/xml
-        application/xml+rss application/x-font-ttf font/opentype
-        image/svg+xml;
+        application/xml+rss application/x-font-ttf font/opentype image/svg+xml;
 
-    upstream php_fpm {{
-        server 127.0.0.1:9000;
-    }}
+    upstream php_fpm {{ server 127.0.0.1:9000; }}
 
     server {{
         listen 8080;
         server_name localhost;
         root {HTDOCS_DIR};
         index index.php index.html index.htm;
-
         client_max_body_size 512M;
-
         add_header X-Frame-Options "SAMEORIGIN" always;
         add_header X-Content-Type-Options "nosniff" always;
         add_header Referrer-Policy "strict-origin-when-cross-origin" always;
-
-{common_locations}
+{common}
     }}
 
     server {{
         listen 8443 ssl;
         server_name localhost;
-
         ssl_certificate "{cert_path}";
         ssl_certificate_key "{key_path}";
         ssl_protocols TLSv1.2 TLSv1.3;
         ssl_ciphers HIGH:!aNULL:!MD5;
         ssl_prefer_server_ciphers on;
-
         root {HTDOCS_DIR};
         index index.php index.html index.htm;
-
         client_max_body_size 512M;
-
         add_header Strict-Transport-Security "max-age=31536000" always;
         add_header X-Frame-Options "SAMEORIGIN" always;
         add_header X-Content-Type-Options "nosniff" always;
         add_header Referrer-Policy "strict-origin-when-cross-origin" always;
-
-{common_locations}
+{common}
     }}
 }}
 """
         conf_path.write_text(nginx_config)
-
         (PREFIX / "var/log").mkdir(parents=True, exist_ok=True)
-        print("\033[1;32m [✓] Nginx configured (no rate-limit on phpMyAdmin). \033[0m")
+        print("\033[1;32m [✓] Nginx configured. \033[0m")
         return True
     except Exception as e:
         print(f"\033[1;31m [!] Nginx config error: {e}\033[0m")
         return False
 
 
-# ---------------------------------------------------------------------------
-# php.ini + conf.d
-# ---------------------------------------------------------------------------
 def create_php_ini():
     php_ini_path = get_php_ini_path()
     PHP_CONFD_DIR.mkdir(parents=True, exist_ok=True)
@@ -754,7 +687,7 @@ def create_php_ini():
 
     removed = clean_php_ini_legacy(php_ini_path)
     if removed:
-        print(f"\033[1;33m [*] Removed {removed} legacy 'extension=' line(s) from php.ini \033[0m")
+        print(f"\033[1;33m [*] Removed {removed} legacy 'extension=' line(s). \033[0m")
 
     ext_dir = php_extension_dir()
     print(f"\033[1;36m [i] PHP extension_dir = {ext_dir} \033[0m")
@@ -774,13 +707,9 @@ error_reporting = E_ALL & ~E_DEPRECATED
 display_errors = On
 date.timezone = UTC
 
-; --- Extensions ---
 extension_dir = "{ext_dir}"
-
-; Security
 cgi.fix_pathinfo=0
 
-; Sessions
 session.save_handler = files
 session.save_path = "{TMP_DIR}"
 session.use_cookies = 1
@@ -802,7 +731,6 @@ session.gc_maxlifetime = 1440
     synced_so = []
     for ext in PHP_EXPECTED_EXTENSIONS:
         ini_file = PHP_CONFD_DIR / f"{ext}.ini"
-
         if ext in loaded_before:
             if ini_file.exists():
                 try:
@@ -810,7 +738,6 @@ session.gc_maxlifetime = 1440
                 except Exception:
                     pass
             continue
-
         if ext in available_so:
             desired = f"extension={ext}.so\n"
             try:
@@ -820,7 +747,6 @@ session.gc_maxlifetime = 1440
             except Exception:
                 pass
             continue
-
         if ini_file.exists():
             try:
                 ini_file.unlink()
@@ -834,23 +760,18 @@ session.gc_maxlifetime = 1440
     preview = ", ".join(loaded_sorted[:15])
     suffix = "..." if len(loaded_sorted) > 15 else ""
     print(f"\033[1;32m [✓] PHP loaded {len(loaded_sorted)} extensions: {preview}{suffix} \033[0m")
-
     return True
 
 
-# ---------------------------------------------------------------------------
-# htdocs
-# ---------------------------------------------------------------------------
 def setup_htdocs():
     try:
         HTDOCS_DIR.mkdir(parents=True, exist_ok=True)
-        (HTDOCS_DIR / "index.php").write_text(
-            "<?php echo '<h1>Nginx + PHP-FPM Server is Running!</h1>'; ?>"
-        )
+        if not (HTDOCS_DIR / "index.php").exists():
+            (HTDOCS_DIR / "index.php").write_text(
+                "<?php echo '<h1>Nginx + PHP-FPM Server is Running!</h1>'; ?>")
         info_dir = HTDOCS_DIR / "phpinfo"
         info_dir.mkdir(exist_ok=True)
         (info_dir / "index.php").write_text("<?php phpinfo(); ?>")
-
         changed = enforce_htdocs_permissions()
         if changed:
             print(f"\033[1;32m [✓] htdocs permissions normalized ({changed} entries). \033[0m")
@@ -862,9 +783,9 @@ def setup_htdocs():
         return False
 
 
-# ---------------------------------------------------------------------------
-# phpMyAdmin config storage setup
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# phpMyAdmin
+# ===========================================================================
 PMA_STORAGE_BLOCK = """\
 $cfg['Servers'][$i]['pmadb'] = 'phpmyadmin';
 $cfg['Servers'][$i]['bookmarktable'] = 'pma__bookmark';
@@ -890,36 +811,41 @@ $cfg['Servers'][$i]['export_templates'] = 'pma__export_templates';
 
 
 def setup_phpmyadmin_storage(pma_dir: Path) -> bool:
-    sock = PREFIX / "var/run/mysqld/mysqld.sock"
     sql_create_tables = pma_dir / "sql" / "create_tables.sql"
-
     if not sql_create_tables.exists():
         print(f"\033[1;33m [!] Missing {sql_create_tables} — skipping storage setup. \033[0m")
         return False
-
-    if not sock.exists():
+    if not MARIADB_SOCKET.exists():
         print("\033[1;33m [!] MariaDB not running — skipping storage setup. \033[0m")
         return False
 
-    run_cmd(f"mysql --socket='{sock}' -e "
+    cli = mysql_client()
+
+    run_cmd(f"{cli} --socket='{MARIADB_SOCKET}' -e "
             f"\"CREATE DATABASE IF NOT EXISTS phpmyadmin "
             f"DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;\"")
 
+    # --force: continue even if some CREATE statements fail (e.g. FK order).
     r = subprocess.run(
-        f"mysql --socket='{sock}' phpmyadmin < '{sql_create_tables}'",
-        shell=True, capture_output=True, text=True
-    )
+        f"{cli} --socket='{MARIADB_SOCKET}' --force phpmyadmin < '{sql_create_tables}'",
+        shell=True, capture_output=True, text=True)
     if r.returncode != 0:
-        print(f"\033[1;33m [!] Import warning: {r.stderr.strip()[:120]} \033[0m")
+        snippet = (r.stderr or "").strip().splitlines()
+        snippet = snippet[0][:200] if snippet else "unknown error"
+        print(f"\033[1;33m [!] Import note: {snippet} \033[0m")
 
+    # Count tables actually created
     r = subprocess.run(
-        f"mysql --socket='{sock}' -N -B -e "
+        f"{cli} --socket='{MARIADB_SOCKET}' -N -B -e "
         f"\"SHOW TABLES FROM phpmyadmin LIKE 'pma\\\\_%';\"",
-        shell=True, capture_output=True, text=True
-    )
+        shell=True, capture_output=True, text=True)
     tables = [ln for ln in r.stdout.splitlines() if ln.strip()]
-    if tables:
+
+    if len(tables) >= 15:
         print(f"\033[1;32m [✓] phpMyAdmin storage DB ready ({len(tables)} tables). \033[0m")
+        return True
+    if tables:
+        print(f"\033[1;33m [!] phpMyAdmin storage partially set up ({len(tables)} tables). \033[0m")
         return True
     print("\033[1;33m [!] phpMyAdmin storage DB has no tables. \033[0m")
     return False
@@ -941,23 +867,15 @@ def patch_phpmyadmin_config(config_file: Path):
         pass
 
 
-# ---------------------------------------------------------------------------
-# phpMyAdmin install
-# ---------------------------------------------------------------------------
 def install_phpmyadmin():
     pma_dir = HTDOCS_DIR / "phpmyadmin"
     is_update = pma_dir.exists()
 
     try:
-        if is_update:
-            print("\033[1;34m [*] Checking and updating phpMyAdmin... \033[0m")
-        else:
-            print("\033[1;34m [*] Downloading and installing phpMyAdmin... \033[0m")
-
+        print("\033[1;34m [*] " + ("Updating" if is_update else "Downloading") + " phpMyAdmin... \033[0m")
         TMP_DIR.mkdir(parents=True, exist_ok=True)
         tar_file = TMP_DIR / "pma.tar.gz"
         url = "https://www.phpmyadmin.net/downloads/phpMyAdmin-latest-all-languages.tar.gz"
-
         run_cmd(f"curl -sL '{url}' -o '{tar_file}'")
         if not tar_file.exists() or tar_file.stat().st_size == 0:
             print("\033[1;31m [!] Failed to download phpMyAdmin. \033[0m")
@@ -982,43 +900,28 @@ def install_phpmyadmin():
             content = config_sample.read_text()
             content = re.sub(
                 r"\$cfg\['blowfish_secret'\]\s*=\s*'';|\$cfg\['blowfish_secret'\]\s*=\s*\".*\";",
-                f"$cfg['blowfish_secret'] = '{secret}';",
-                content,
-            )
+                f"$cfg['blowfish_secret'] = '{secret}';", content)
             allow_nopass = "true" if not DB_ROOT_PASSWORD else "false"
             content = re.sub(
                 r"\$cfg\['Servers'\]\[\$i\]\['AllowNoPassword'\]\s*=\s*(true|false);",
-                f"$cfg['Servers'][$i]['AllowNoPassword'] = {allow_nopass};",
-                content,
-            )
+                f"$cfg['Servers'][$i]['AllowNoPassword'] = {allow_nopass};", content)
             if "AllowNoPassword" not in content:
                 content += f"\n$cfg['Servers'][$i]['AllowNoPassword'] = {allow_nopass};\n"
-
             content = re.sub(
                 r"\$cfg\['Servers'\]\[\$i\]\['host'\]\s*=\s*'localhost';",
-                "$cfg['Servers'][$i]['host'] = '127.0.0.1';",
-                content,
-            )
-
+                "$cfg['Servers'][$i]['host'] = '127.0.0.1';", content)
             pma_tmp = pma_dir / "tmp"
             pma_tmp.mkdir(exist_ok=True)
             content += f"\n$cfg['TempDir'] = '{pma_tmp}';\n"
             content += "\n" + PMA_STORAGE_BLOCK
-
             config_file.write_text(content)
 
-        pma_tmp = pma_dir / "tmp"
-        pma_tmp.mkdir(exist_ok=True)
-
+        (pma_dir / "tmp").mkdir(exist_ok=True)
         patch_phpmyadmin_config(config_file)
         storage_ok = setup_phpmyadmin_storage(pma_dir)
-
         enforce_htdocs_permissions()
 
-        if is_update:
-            print("\033[1;32m [✓] phpMyAdmin updated successfully. \033[0m")
-        else:
-            print("\033[1;32m [✓] phpMyAdmin installed. \033[0m")
+        print("\033[1;32m [✓] phpMyAdmin " + ("updated" if is_update else "installed") + ". \033[0m")
         if storage_ok:
             print("\033[1;32m [✓] phpMyAdmin configuration storage active. \033[0m")
         return True
@@ -1027,9 +930,9 @@ def install_phpmyadmin():
         return False
 
 
-# ---------------------------------------------------------------------------
-# myserver CLI (bash)
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# CLI generator
+# ===========================================================================
 def create_myserver_cli():
     bin_path = PREFIX / "bin/myserver"
     VERSION_FILE.write_text(CURRENT_VERSION)
@@ -1042,48 +945,39 @@ VERSION_FILE="{VERSION_FILE}"
 GITHUB_RAW_URL="{GITHUB_RAW_URL}"
 PHP_CONFD_DIR="{PHP_CONFD_DIR}"
 PHP_LIB_DIR="{PHP_LIB_DIR}"
+MYSQL_DATA_DIR="{MYSQL_DATA_DIR}"
+MYSQL_RUN_DIR="{MYSQL_RUN_DIR}"
 TUNNEL_PID_FILE="$PREFIX/tmp/cloudflared.pid"
 TUNNEL_URL_FILE="$PREFIX/tmp/cloudflared.url"
 TUNNEL_LOG="$PREFIX/tmp/cloudflared.log"
-MARIADB_SOCKET="$PREFIX/var/run/mysqld/mysqld.sock"
+MARIADB_SOCKET="$MYSQL_RUN_DIR/mysqld.sock"
+
+# Prefer mariadb over mysql (avoids deprecation warnings)
+MYSQL_CLI=$(command -v mariadb || command -v mysql)
+MYSQL_ADMIN=$(command -v mariadb-admin || command -v mysqladmin)
 
 is_tunnel_running() {{
     if [ -f "$TUNNEL_PID_FILE" ]; then
         TPID=$(cat "$TUNNEL_PID_FILE" 2>/dev/null)
-        if [ -n "$TPID" ] && kill -0 "$TPID" 2>/dev/null; then
-            return 0
-        fi
+        if [ -n "$TPID" ] && kill -0 "$TPID" 2>/dev/null; then return 0; fi
     fi
-    if pgrep -f "cloudflared tunnel" > /dev/null; then
-        return 0
-    fi
+    pgrep -f "cloudflared tunnel" > /dev/null && return 0
     return 1
 }}
 
 get_tunnel_url() {{
-    if [ -f "$TUNNEL_URL_FILE" ]; then
-        cat "$TUNNEL_URL_FILE" 2>/dev/null
-    fi
+    [ -f "$TUNNEL_URL_FILE" ] && cat "$TUNNEL_URL_FILE" 2>/dev/null
 }}
 
 has_internet() {{
-    if curl -s --max-time 5 -o /dev/null -w "%{{http_code}}" https://1.1.1.1 2>/dev/null | grep -qE '^[23]'; then
-        return 0
-    fi
-    if curl -s --max-time 5 -o /dev/null https://www.google.com 2>/dev/null; then
-        return 0
-    fi
+    curl -s --max-time 5 -o /dev/null -w "%{{http_code}}" https://1.1.1.1 2>/dev/null | grep -qE '^[23]' && return 0
+    curl -s --max-time 5 -o /dev/null https://www.google.com 2>/dev/null && return 0
     return 1
 }}
 
 open_browser() {{
-    if command -v termux-open-url &> /dev/null; then
-        termux-open-url "http://localhost:8080" > /dev/null 2>&1 &
-    elif command -v termux-open &> /dev/null; then
-        termux-open "http://localhost:8080" > /dev/null 2>&1 &
-    elif command -v xdg-open &> /dev/null; then
-        xdg-open "http://localhost:8080" > /dev/null 2>&1 &
-    fi
+    command -v termux-open-url &> /dev/null && termux-open-url "http://localhost:8080" > /dev/null 2>&1 &
+    return 0
 }}
 
 sync_php_extensions() {{
@@ -1091,10 +985,8 @@ sync_php_extensions() {{
     ext_dir=$(php -n -r 'echo ini_get("extension_dir");' 2>/dev/null | tail -n1)
     [ -z "$ext_dir" ] && ext_dir="$PHP_LIB_DIR"
     mkdir -p "$ext_dir" "$PHP_CONFD_DIR" 2>/dev/null
-
     local loaded
     loaded=$(php -m 2>/dev/null | tr 'A-Z' 'a-z')
-
     for ext in gd sodium redis apcu imagick; do
         if echo "$loaded" | grep -qx "$ext"; then
             rm -f "$PHP_CONFD_DIR/$ext.ini"
@@ -1109,12 +1001,8 @@ sync_php_extensions() {{
 }}
 
 check_webroot() {{
-    if [ ! -d "$HTDOCS_DIR" ]; then
-        echo -e "\033[1;31m[!] Web root missing: $HTDOCS_DIR\033[0m"
-        return 1
-    fi
+    [ -d "$HTDOCS_DIR" ] || {{ echo -e "\033[1;31m[!] Web root missing\033[0m"; return 1; }}
     if [ ! -r "$HTDOCS_DIR" ] || [ ! -x "$HTDOCS_DIR" ]; then
-        echo -e "\033[1;33m[*] Auto-fixing web root permissions...\033[0m"
         chmod 755 "$HTDOCS_DIR" 2>/dev/null
         find "$HTDOCS_DIR" -type d -exec chmod 755 {{}} \; 2>/dev/null
         find "$HTDOCS_DIR" -type f -exec chmod 644 {{}} \; 2>/dev/null
@@ -1125,19 +1013,16 @@ check_webroot() {{
 ensure_pma_storage() {{
     [ -S "$MARIADB_SOCKET" ] || return 0
     local count
-    count=$(mysql --socket="$MARIADB_SOCKET" -N -B -e \
-        "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='phpmyadmin' AND table_name LIKE 'pma\\\\_%';" \
-        2>/dev/null)
+    count=$("$MYSQL_CLI" --socket="$MARIADB_SOCKET" -N -B -e \
+        "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='phpmyadmin' AND table_name LIKE 'pma\\\\_%';" 2>/dev/null)
     [ -z "$count" ] && return 0
     [ "$count" -gt 0 ] 2>/dev/null && return 0
-
     local pma_sql="$HTDOCS_DIR/phpmyadmin/sql/create_tables.sql"
     [ -f "$pma_sql" ] || return 0
-
     echo -e "\033[1;34m[*] Setting up phpMyAdmin configuration storage...\033[0m"
-    mysql --socket="$MARIADB_SOCKET" -e \
+    "$MYSQL_CLI" --socket="$MARIADB_SOCKET" -e \
         "CREATE DATABASE IF NOT EXISTS phpmyadmin DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" 2>/dev/null
-    mysql --socket="$MARIADB_SOCKET" phpmyadmin < "$pma_sql" 2>/dev/null
+    "$MYSQL_CLI" --socket="$MARIADB_SOCKET" --force phpmyadmin < "$pma_sql" 2>/dev/null
     echo -e "\033[1;32m[OK] phpMyAdmin storage ready.\033[0m"
 }}
 
@@ -1153,7 +1038,6 @@ show_banner_and_status() {{
     echo "          __/ |                                     "
     echo "         |___/        Server Manager v{CURRENT_VERSION}  "
     echo -e "\033[0m"
-
     echo -e "\033[1;33m============= [ DEVELOPER INFO ] ==============\033[0m"
     echo -e " Developer : \033[1;32mElias Esmail\033[0m"
     echo -e " WhatsApp  : \033[1;32m+967771902342\033[0m"
@@ -1165,23 +1049,14 @@ show_banner_and_status() {{
     pgrep -f php-fpm > /dev/null && echo -e " PHP-FPM:  \033[1;32mRunning [OK]\033[0m" || echo -e " PHP-FPM:  \033[1;31mStopped [X]\033[0m"
     pgrep -f "mariadb|mysqld" > /dev/null && echo -e " MariaDB:  \033[1;32mRunning [OK]\033[0m" || echo -e " MariaDB:  \033[1;31mStopped [X]\033[0m"
     pgrep -f redis-server > /dev/null && echo -e " Redis:    \033[1;32mRunning [OK]\033[0m" || echo -e " Redis:    \033[1;31mStopped [X]\033[0m"
-    if is_tunnel_running; then
-        echo -e " Tunnel:   \033[1;32mRunning [OK]\033[0m"
-    else
-        echo -e " Tunnel:   \033[1;31mStopped [X]\033[0m"
-    fi
+    is_tunnel_running && echo -e " Tunnel:   \033[1;32mRunning [OK]\033[0m" || echo -e " Tunnel:   \033[1;31mStopped [X]\033[0m"
     echo -e "\033[1;35m===============================================\033[0m\n"
 
     SVC_INFO=0
-    if pgrep -f nginx > /dev/null || pgrep -f php-fpm > /dev/null || pgrep -f "mariadb|mysqld" > /dev/null || pgrep -f redis-server > /dev/null; then
-        SVC_INFO=1
-    fi
-
+    pgrep -f nginx > /dev/null || pgrep -f php-fpm > /dev/null || pgrep -f "mariadb|mysqld" > /dev/null || pgrep -f redis-server > /dev/null && SVC_INFO=1
     TUNNEL_URL_VAL=$(get_tunnel_url)
     TUNNEL_ACTIVE=0
-    if is_tunnel_running && [ -n "$TUNNEL_URL_VAL" ]; then
-        TUNNEL_ACTIVE=1
-    fi
+    is_tunnel_running && [ -n "$TUNNEL_URL_VAL" ] && TUNNEL_ACTIVE=1
 
     if [ "$SVC_INFO" -eq 1 ] || [ "$TUNNEL_ACTIVE" -eq 1 ]; then
         echo -e "\033[1;36m============= [ SERVER INFORMATION ] =============\033[0m"
@@ -1189,11 +1064,7 @@ show_banner_and_status() {{
         echo -e " HTTP URL      : \033[1;34mhttp://localhost:8080\033[0m"
         echo -e " HTTPS URL     : \033[1;32mhttps://localhost:8443\033[0m"
         echo -e " phpMyAdmin    : \033[1;35mhttp://localhost:8080/phpmyadmin\033[0m"
-        if [ "$TUNNEL_ACTIVE" -eq 1 ]; then
-            echo -e " Global URL    : \033[1;32m$TUNNEL_URL_VAL\033[0m"
-        else
-            echo -e " Global URL    : \033[1;31mInactive\033[0m"
-        fi
+        [ "$TUNNEL_ACTIVE" -eq 1 ] && echo -e " Global URL    : \033[1;32m$TUNNEL_URL_VAL\033[0m" || echo -e " Global URL    : \033[1;31mInactive\033[0m"
         echo -e "\033[1;36m==================================================\033[0m\n"
     fi
 }}
@@ -1201,22 +1072,16 @@ show_banner_and_status() {{
 start_services() {{
     sync_php_extensions
     check_webroot
-
     echo -e "\033[1;34m[+] Starting MariaDB...\033[0m"
-    mkdir -p "$PREFIX/var/lib/mysql" "$PREFIX/var/run/mysqld"
+    mkdir -p "$MYSQL_DATA_DIR" "$MYSQL_RUN_DIR"
     if ! pgrep -f "mariadb|mysqld" > /dev/null; then
         [ -S "$MARIADB_SOCKET" ] && rm -f "$MARIADB_SOCKET"
-        if [ ! -d "$PREFIX/var/lib/mysql/mysql" ]; then
-            mariadb-install-db --datadir="$PREFIX/var/lib/mysql" > /dev/null 2>&1
-        fi
+        [ ! -d "$MYSQL_DATA_DIR/mysql" ] && mariadb-install-db --datadir="$MYSQL_DATA_DIR" > /dev/null 2>&1
         if command -v mariadbd-safe &> /dev/null; then
-            mariadbd-safe --datadir="$PREFIX/var/lib/mysql" --socket="$MARIADB_SOCKET" > /dev/null 2>&1 &
-        elif command -v mysqld_safe &> /dev/null; then
-            mysqld_safe --datadir="$PREFIX/var/lib/mysql" --socket="$MARIADB_SOCKET" > /dev/null 2>&1 &
+            mariadbd-safe --datadir="$MYSQL_DATA_DIR" --socket="$MARIADB_SOCKET" > /dev/null 2>&1 &
         else
-            mariadbd --datadir="$PREFIX/var/lib/mysql" --socket="$MARIADB_SOCKET" > /dev/null 2>&1 &
+            mariadbd --datadir="$MYSQL_DATA_DIR" --socket="$MARIADB_SOCKET" > /dev/null 2>&1 &
         fi
-
         echo -e "\033[1;33m[*] Waiting for MariaDB socket...\033[0m"
         i=0
         while [ $i -lt 15 ]; do
@@ -1225,130 +1090,84 @@ start_services() {{
             i=$((i+1))
         done
     fi
-
     ensure_pma_storage
 
     echo -e "\033[1;34m[+] Starting Redis...\033[0m"
     mkdir -p "$PREFIX/var/lib/redis" "$PREFIX/var/log"
     if ! pgrep -f redis-server > /dev/null; then
         if [ -f "$PREFIX/etc/redis.conf" ]; then
-            grep -q "ignore-warnings ARM64-COW-BUG" "$PREFIX/etc/redis.conf" || \
-                echo "ignore-warnings ARM64-COW-BUG" >> "$PREFIX/etc/redis.conf"
             redis-server "$PREFIX/etc/redis.conf" > /dev/null 2>&1
         else
             redis-server --daemonize yes --ignore-warnings ARM64-COW-BUG > /dev/null 2>&1
         fi
     fi
-
     echo -e "\033[1;34m[+] Starting PHP-FPM...\033[0m"
-    if ! pgrep -f php-fpm > /dev/null; then
-        php-fpm > /dev/null 2>&1
-    fi
-
+    pgrep -f php-fpm > /dev/null || php-fpm > /dev/null 2>&1
     echo -e "\033[1;34m[+] Starting Nginx...\033[0m"
-    if ! pgrep -f nginx > /dev/null; then
-        nginx > /dev/null 2>&1
-    fi
-
+    pgrep -f nginx > /dev/null || nginx > /dev/null 2>&1
     sleep 1.5
     echo -e "\033[1;32m[OK] Services started successfully.\033[0m"
-
     echo -e "\033[1;33m[*] Opening http://localhost:8080 in browser...\033[0m"
     open_browser
     sleep 1
 }}
 
 stop_services() {{
-    if is_tunnel_running; then
-        echo -e "\033[1;33m[*] Stopping internet tunnel...\033[0m"
-        disable_internet
-    fi
+    is_tunnel_running && disable_internet
     echo -e "\033[1;33m[*] Stopping all services (graceful)...\033[0m"
-
-    if [ -S "$MARIADB_SOCKET" ]; then
-        mysqladmin --socket="$MARIADB_SOCKET" shutdown 2>/dev/null
-        sleep 2
-    fi
+    [ -S "$MARIADB_SOCKET" ] && {{ "$MYSQL_ADMIN" --socket="$MARIADB_SOCKET" shutdown 2>/dev/null; sleep 2; }}
     pkill -TERM -f "mariadbd-safe" > /dev/null 2>&1
     pkill -TERM -f "mysqld_safe"   > /dev/null 2>&1
     sleep 1
     pkill -TERM -f "mariadbd|mysqld" > /dev/null 2>&1
     sleep 1
     pkill -KILL -f "mariadbd|mysqld" > /dev/null 2>&1
-
     pkill -f nginx > /dev/null 2>&1
     pkill -f php-fpm > /dev/null 2>&1
     pkill -f redis-server > /dev/null 2>&1
-
     echo -e "\033[1;31m[OK] All services stopped safely.\033[0m"
     sleep 1
 }}
 
-restart_services() {{
-    stop_services
-    sleep 1
-    start_services
-}}
+restart_services() {{ stop_services; sleep 1; start_services; }}
 
 enable_internet() {{
     if ! pgrep -f nginx > /dev/null && ! pgrep -f php-fpm > /dev/null && ! pgrep -f "mariadb|mysqld" > /dev/null && ! pgrep -f redis-server > /dev/null; then
-        echo -e "\033[1;31m[!] Server is not running. Please start the server first.\033[0m"
+        echo -e "\033[1;31m[!] Server is not running.\033[0m"
         sleep 2
         return
     fi
-
-    if is_tunnel_running; then
-        echo -e "\033[1;33m[i] Internet tunnel is already running.\033[0m"
-        sleep 1.5
-        return
-    fi
-
-    if ! has_internet; then
-        echo -e "\033[1;31m[!] No internet connection.\033[0m"
-        sleep 2
-        return
-    fi
-
+    is_tunnel_running && {{ echo -e "\033[1;33m[i] Tunnel already running.\033[0m"; sleep 1.5; return; }}
+    has_internet || {{ echo -e "\033[1;31m[!] No internet.\033[0m"; sleep 2; return; }}
     echo -e "\033[1;34m[*] Starting Cloudflare tunnel...\033[0m"
     rm -f "$TUNNEL_PID_FILE" "$TUNNEL_URL_FILE" "$TUNNEL_LOG"
     cloudflared tunnel --url http://localhost:8080 > "$TUNNEL_LOG" 2>&1 &
     echo $! > "$TUNNEL_PID_FILE"
-
     echo -e "\033[1;33m[*] Waiting for the public URL...\033[0m"
     FOUND_URL=""
     i=0
     while [ $i -lt 30 ]; do
         sleep 1
         i=$((i+1))
-        FOUND_URL=$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' "$TUNNEL_LOG" 2>/dev/null | head -n 1)
+        FOUND_URL=$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' "$TUNNEL_LOG" 2>/dev/null | head -n1)
         [ -n "$FOUND_URL" ] && break
     done
-
     if [ -n "$FOUND_URL" ]; then
         echo "$FOUND_URL" > "$TUNNEL_URL_FILE"
         echo -e "\033[1;32m[OK] Global URL: $FOUND_URL\033[0m"
     else
-        echo -e "\033[1;31m[!] Failed to obtain the tunnel URL. Stopping tunnel.\033[0m"
+        echo -e "\033[1;31m[!] Failed to obtain tunnel URL.\033[0m"
         disable_internet
     fi
     sleep 2
 }}
 
 disable_internet() {{
-    if ! is_tunnel_running; then
-        echo -e "\033[1;33m[i] Internet tunnel is already disabled.\033[0m"
-        sleep 1
-        return
-    fi
-
+    is_tunnel_running || {{ echo -e "\033[1;33m[i] Tunnel already disabled.\033[0m"; sleep 1; return; }}
     echo -e "\033[1;33m[*] Stopping Cloudflare tunnel...\033[0m"
     if [ -f "$TUNNEL_PID_FILE" ]; then
         TPID=$(cat "$TUNNEL_PID_FILE" 2>/dev/null)
-        if [ -n "$TPID" ]; then
-            kill "$TPID" 2>/dev/null
-            sleep 1
-            kill -9 "$TPID" 2>/dev/null
-        fi
+        [ -n "$TPID" ] && {{ kill "$TPID" 2>/dev/null; sleep 1; kill -9 "$TPID" 2>/dev/null; }}
     fi
     pkill -f "cloudflared tunnel" > /dev/null 2>&1
     rm -f "$TUNNEL_PID_FILE" "$TUNNEL_URL_FILE" "$TUNNEL_LOG"
@@ -1366,7 +1185,6 @@ quickstart_menu() {{
     echo " 4) Back to main menu"
     echo ""
     read -p $'\033[1;33mSelect framework [1-4]: \033[0m' q_choice
-
     case "$q_choice" in
         1) install_wordpress ;;
         2) install_laravel ;;
@@ -1376,108 +1194,56 @@ quickstart_menu() {{
 }}
 
 install_wordpress() {{
-    echo -e "\033[1;34m[*] Preparing WordPress installation...\033[0m"
     WP_DIR="$HTDOCS_DIR/wordpress"
-    if [ -d "$WP_DIR" ]; then
-        echo -e "\033[1;31m[!] Folder $WP_DIR already exists.\033[0m"
-        read -p "Press Enter to return..."
-        return
-    fi
-
-    echo -e "\033[1;33m[*] Downloading latest WordPress...\033[0m"
+    [ -d "$WP_DIR" ] && {{ echo -e "\033[1;31m[!] $WP_DIR exists.\033[0m"; read -p "Enter..."; return; }}
+    echo -e "\033[1;33m[*] Downloading WordPress...\033[0m"
     mkdir -p "$PREFIX/tmp"
-    WP_TAR="$PREFIX/tmp/wordpress.tar.gz"
-    curl -sL https://wordpress.org/latest.tar.gz -o "$WP_TAR"
-
-    if [ ! -s "$WP_TAR" ]; then
-        echo -e "\033[1;31m[!] Download failed.\033[0m"
-        rm -f "$WP_TAR"
-        read -p "Press Enter to return..."
-        return
+    curl -sL https://wordpress.org/latest.tar.gz -o "$PREFIX/tmp/wordpress.tar.gz"
+    [ ! -s "$PREFIX/tmp/wordpress.tar.gz" ] && {{ echo -e "\033[1;31m[!] Download failed.\033[0m"; read -p "Enter..."; return; }}
+    tar -xf "$PREFIX/tmp/wordpress.tar.gz" -C "$HTDOCS_DIR"
+    rm -f "$PREFIX/tmp/wordpress.tar.gz"
+    if [ -S "$MARIADB_SOCKET" ]; then
+        "$MYSQL_CLI" --socket="$MARIADB_SOCKET" -e "CREATE DATABASE IF NOT EXISTS wordpress DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" 2>/dev/null
     fi
-
-    tar -xf "$WP_TAR" -C "$HTDOCS_DIR"
-    rm -f "$WP_TAR"
-
-    if pgrep -f "mariadb|mysqld" > /dev/null && [ -S "$MARIADB_SOCKET" ]; then
-        echo -e "\033[1;34m[*] Creating MariaDB database 'wordpress'...\033[0m"
-        mysql --socket="$MARIADB_SOCKET" -e "CREATE DATABASE IF NOT EXISTS wordpress DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" 2>/dev/null
-    fi
-
     chmod 755 "$HTDOCS_DIR" 2>/dev/null
     find "$HTDOCS_DIR" -type d -exec chmod 755 {{}} \; 2>/dev/null
     find "$HTDOCS_DIR" -type f -exec chmod 644 {{}} \; 2>/dev/null
-
     echo -e "\033[1;32m[✓] WordPress installed!\033[0m"
-    echo -e " URL      : \033[1;34mhttp://localhost:8080/wordpress\033[0m"
-    echo ""
+    echo -e " URL: \033[1;34mhttp://localhost:8080/wordpress\033[0m"
     read -p "Press Enter to continue..."
 }}
 
 install_laravel() {{
-    echo -e "\033[1;34m[*] Preparing Laravel...\033[0m"
-
-    if ! command -v composer &> /dev/null; then
-        echo -e "\033[1;33m[*] Installing Composer...\033[0m"
-        pkg install composer -y
-    fi
-
-    read -p "Enter project folder name [default: laravel]: " PROJECT_NAME
+    command -v composer &> /dev/null || pkg install composer -y
+    read -p "Project folder name [default: laravel]: " PROJECT_NAME
     PROJECT_NAME=${{PROJECT_NAME:-laravel}}
     LARAVEL_DIR="$HTDOCS_DIR/$PROJECT_NAME"
-
-    if [ -d "$LARAVEL_DIR" ]; then
-        echo -e "\033[1;31m[!] Folder exists.\033[0m"
-        read -p "Press Enter to return..."
-        return
-    fi
-
+    [ -d "$LARAVEL_DIR" ] && {{ echo -e "\033[1;31m[!] Exists.\033[0m"; read -p "Enter..."; return; }}
     composer create-project --prefer-dist laravel/laravel "$LARAVEL_DIR"
-
     DB_NAME=$(echo "$PROJECT_NAME" | tr '-' '_')
-    if pgrep -f "mariadb|mysqld" > /dev/null && [ -S "$MARIADB_SOCKET" ]; then
-        mysql --socket="$MARIADB_SOCKET" -e "CREATE DATABASE IF NOT EXISTS \`$DB_NAME\` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" 2>/dev/null
+    if [ -S "$MARIADB_SOCKET" ]; then
+        "$MYSQL_CLI" --socket="$MARIADB_SOCKET" -e "CREATE DATABASE IF NOT EXISTS \`$DB_NAME\` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" 2>/dev/null
     fi
-
     chmod 755 "$HTDOCS_DIR" 2>/dev/null
     find "$HTDOCS_DIR" -type d -exec chmod 755 {{}} \; 2>/dev/null
     find "$HTDOCS_DIR" -type f -exec chmod 644 {{}} \; 2>/dev/null
-
     echo -e "\033[1;32m[✓] Laravel installed!\033[0m"
-    echo -e " URL      : \033[1;34mhttp://localhost:8080/$PROJECT_NAME/public\033[0m"
-    echo ""
+    echo -e " URL: \033[1;34mhttp://localhost:8080/$PROJECT_NAME/public\033[0m"
     read -p "Press Enter to continue..."
 }}
 
 install_nextcloud() {{
-    echo -e "\033[1;34m[*] Preparing Nextcloud...\033[0m"
     NC_DIR="$HTDOCS_DIR/nextcloud"
-    if [ -d "$NC_DIR" ]; then
-        echo -e "\033[1;31m[!] Folder exists.\033[0m"
-        read -p "Press Enter to return..."
-        return
-    fi
-
-    echo -e "\033[1;33m[*] Downloading Nextcloud...\033[0m"
+    [ -d "$NC_DIR" ] && {{ echo -e "\033[1;31m[!] Exists.\033[0m"; read -p "Enter..."; return; }}
     mkdir -p "$PREFIX/tmp"
-    NC_ZIP="$PREFIX/tmp/nextcloud.zip"
-    curl -sL https://download.nextcloud.com/server/releases/latest.zip -o "$NC_ZIP"
-
-    if [ ! -s "$NC_ZIP" ]; then
-        echo -e "\033[1;31m[!] Download failed.\033[0m"
-        rm -f "$NC_ZIP"
-        read -p "Press Enter to return..."
-        return
-    fi
-
-    unzip -q "$NC_ZIP" -d "$HTDOCS_DIR"
-    rm -f "$NC_ZIP"
-
+    curl -sL https://download.nextcloud.com/server/releases/latest.zip -o "$PREFIX/tmp/nextcloud.zip"
+    [ ! -s "$PREFIX/tmp/nextcloud.zip" ] && {{ echo -e "\033[1;31m[!] Download failed.\033[0m"; read -p "Enter..."; return; }}
+    unzip -q "$PREFIX/tmp/nextcloud.zip" -d "$HTDOCS_DIR"
+    rm -f "$PREFIX/tmp/nextcloud.zip"
     NC_DB_PASS=$(head -c 18 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 20)
     NC_DB_USER="ncuser"
-
-    if pgrep -f "mariadb|mysqld" > /dev/null && [ -S "$MARIADB_SOCKET" ]; then
-        mysql --socket="$MARIADB_SOCKET" <<SQL 2>/dev/null
+    if [ -S "$MARIADB_SOCKET" ]; then
+        "$MYSQL_CLI" --socket="$MARIADB_SOCKET" <<SQL 2>/dev/null
 CREATE DATABASE IF NOT EXISTS nextcloud DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE USER IF NOT EXISTS '$NC_DB_USER'@'127.0.0.1' IDENTIFIED BY '$NC_DB_PASS';
 CREATE USER IF NOT EXISTS '$NC_DB_USER'@'localhost' IDENTIFIED BY '$NC_DB_PASS';
@@ -1486,50 +1252,35 @@ GRANT ALL PRIVILEGES ON nextcloud.* TO '$NC_DB_USER'@'localhost';
 FLUSH PRIVILEGES;
 SQL
     fi
-
     chmod 755 "$HTDOCS_DIR" 2>/dev/null
     find "$HTDOCS_DIR" -type d -exec chmod 755 {{}} \; 2>/dev/null
     find "$HTDOCS_DIR" -type f -exec chmod 644 {{}} \; 2>/dev/null
-
     echo -e "\033[1;32m[✓] Nextcloud installed!\033[0m"
-    echo -e " URL      : \033[1;34mhttp://localhost:8080/nextcloud\033[0m"
-    echo -e " DB User  : \033[1;33m$NC_DB_USER\033[0m"
-    echo -e " DB Pass  : \033[1;33m$NC_DB_PASS\033[0m  \033[1;31m(save this!)\033[0m"
-    echo ""
+    echo -e " DB User: \033[1;33m$NC_DB_USER\033[0m"
+    echo -e " DB Pass: \033[1;33m$NC_DB_PASS\033[0m  \033[1;31m(save this!)\033[0m"
     read -p "Press Enter to continue..."
 }}
 
 update_server() {{
     MODE="$1"
     [ "$MODE" != "auto" ] && echo -e "\033[1;36m[*] Checking for updates...\033[0m"
-
     LOCAL_VER=$(cat "$VERSION_FILE" 2>/dev/null || echo "{CURRENT_VERSION}")
-
     mkdir -p "$PREFIX/tmp"
     TMP_UPD="$PREFIX/tmp/install_server_latest.py"
     curl -sL --max-time 15 "$GITHUB_RAW_URL/install_server.py" -o "$TMP_UPD" 2>/dev/null
-
     if [ ! -s "$TMP_UPD" ]; then
         rm -f "$TMP_UPD"
-        if [ "$MODE" = "auto" ]; then
-            sleep 1.2
-            return
-        fi
-        echo -e "\033[1;31m[!] Connection failed.\033[0m"
-        read -p "Press Enter to continue..."
+        [ "$MODE" = "auto" ] && sleep 1.2 || {{ echo -e "\033[1;31m[!] Connection failed.\033[0m"; read -p "Enter..."; }}
         return
     fi
-
     REMOTE_VER=$(grep -oP 'CURRENT_VERSION\s*=\s*"\K[^"]+' "$TMP_UPD" 2>/dev/null || echo "0.0.0")
-
     echo -e "  - Installed : \033[1;33m$LOCAL_VER\033[0m"
     echo -e "  - Remote    : \033[1;32m$REMOTE_VER\033[0m"
 
     if [ "$LOCAL_VER" != "$REMOTE_VER" ]; then
         echo -e "\n\033[1;35m[!] New version ($REMOTE_VER) available!\033[0m"
         echo -e "\033[1;33m[*] Changelog:\033[0m"
-
-        PARSER="$PREFIX/tmp/myserver_changelog_parser.py"
+        PARSER="$PREFIX/tmp/changelog_parser.py"
         cat > "$PARSER" <<'PYEOF'
 import ast, re, sys
 try:
@@ -1540,21 +1291,20 @@ try:
         for item in ast.literal_eval(m.group(1)):
             print("  - " + str(item))
     else:
-        print("  - General fixes and improvements.")
+        print("  - General fixes.")
 except Exception:
-    print("  - General fixes and improvements.")
+    print("  - General fixes.")
 PYEOF
         python3 "$PARSER" "$TMP_UPD"
         rm -f "$PARSER"
-
         echo ""
         read -p "Download and install update now? (y/N): " confirm
         case "$confirm" in
-            [yY][eE][sS]|[yY])
+            [yY]*)
                 echo -e "\033[1;33m[*] Stopping services...\033[0m"
                 stop_services
-                echo -e "\033[1;34m[*] Installing update...\033[0m"
-                MYSERVER_SKIP_AUTOUPDATE=1 python3 "$TMP_UPD"
+                echo -e "\033[1;34m[*] Installing update (databases + htdocs preserved)...\033[0m"
+                MYSERVER_SKIP_AUTOUPDATE=1 MYSERVER_REINSTALL=1 python3 "$TMP_UPD"
                 rm -f "$TMP_UPD"
                 echo -e "\n\033[1;32m[OK] Updated to $REMOTE_VER!\033[0m"
                 read -r
@@ -1562,23 +1312,14 @@ PYEOF
                 exec "$PREFIX/bin/myserver"
                 ;;
             *)
-                echo -e "\033[1;33m[INFO] Update cancelled.\033[0m"
                 rm -f "$TMP_UPD"
-                if [ "$MODE" != "auto" ]; then
-                    read -p "Press Enter to continue..."
-                else
-                    sleep 1
-                fi
+                [ "$MODE" != "auto" ] && read -p "Enter..." || sleep 1
                 ;;
         esac
     else
         echo -e "\033[1;32m[OK] Already on latest ($LOCAL_VER).\033[0m"
         rm -f "$TMP_UPD"
-        if [ "$MODE" != "auto" ]; then
-            read -p "Press Enter to continue..."
-        else
-            sleep 1.2
-        fi
+        [ "$MODE" != "auto" ] && read -p "Enter..." || sleep 1.2
     fi
 }}
 
@@ -1586,37 +1327,33 @@ reinstall_server() {{
     echo -e "\033[1;35m============================================\033[0m"
     echo -e "\033[1;35m   REINSTALL MYSERVER STACK (Fix Issues)    \033[0m"
     echo -e "\033[1;35m============================================\033[0m"
-    echo -e " Web root ($HTDOCS_DIR) will NOT be deleted."
+    echo -e " \033[1;32m✓\033[0m Databases will be \033[1;32mpreserved\033[0m"
+    echo -e " \033[1;32m✓\033[0m htdocs contents will be \033[1;32mpreserved\033[0m"
+    echo -e " \033[1;33m↻\033[0m phpMyAdmin will be \033[1;33mupdated\033[0m to latest"
     echo ""
     read -p "Reinstall myserver? (y/N): " confirm
     case "$confirm" in
-        [yY][eE][sS]|[yY])
+        [yY]*)
             echo -e "\033[1;36m[*] Downloading latest installer...\033[0m"
             mkdir -p "$PREFIX/tmp"
             TMP_UPD="$PREFIX/tmp/install_server_latest.py"
             curl -sL --max-time 30 "$GITHUB_RAW_URL/install_server.py" -o "$TMP_UPD" 2>/dev/null
-
             if [ ! -s "$TMP_UPD" ]; then
                 echo -e "\033[1;31m[!] Download failed.\033[0m"
                 rm -f "$TMP_UPD"
-                read -p "Press Enter to continue..."
+                read -p "Enter..."
                 return
             fi
-
             stop_services
-            echo -e "\033[1;34m[*] Reinstalling...\033[0m"
-            MYSERVER_SKIP_AUTOUPDATE=1 python3 "$TMP_UPD"
+            echo -e "\033[1;34m[*] Reinstalling (databases + htdocs preserved)...\033[0m"
+            MYSERVER_SKIP_AUTOUPDATE=1 MYSERVER_REINSTALL=1 python3 "$TMP_UPD"
             rm -f "$TMP_UPD"
-
             echo -e "\n\033[1;32m[OK] Reinstall completed!\033[0m"
             read -r
             export MYSERVER_SKIP_AUTOUPDATE=1
             exec "$PREFIX/bin/myserver"
             ;;
-        *)
-            echo -e "\033[1;36m[INFO] Cancelled.\033[0m"
-            sleep 1
-            ;;
+        *) echo -e "\033[1;36m[INFO] Cancelled.\033[0m"; sleep 1 ;;
     esac
 }}
 
@@ -1624,11 +1361,33 @@ uninstall_server() {{
     echo -e "\033[1;31m============================================\033[0m"
     echo -e "\033[1;31m   WARNING: UNINSTALL MYSERVER STACK        \033[0m"
     echo -e "\033[1;31m============================================\033[0m"
-    read -p "Uninstall myserver? (y/N): " confirm
+    echo -e " This will \033[1;31mPERMANENTLY DELETE\033[0m:"
+    echo -e "   \033[1;31m✗\033[0m All server configuration files"
+    echo -e "   \033[1;31m✗\033[0m \033[1;31mALL user databases\033[0m (WordPress, Nextcloud, Laravel, ...)"
+    echo -e "   \033[1;31m✗\033[0m The MariaDB data directory"
+    echo -e "   \033[1;31m✗\033[0m The web root: \033[1;33m$HTDOCS_DIR\033[0m (including ALL contents)"
+    echo -e "   \033[1;31m✗\033[0m ~/.my.cnf and the myserver CLI"
+    echo ""
+    read -p $'\033[1;31mAre you sure? Type "yes" to confirm: \033[0m' confirm
     case "$confirm" in
-        [yY][eE][sS]|[yY])
+        yes|YES|Yes|y|Y|[yY][eE][sS])
             stop_services
 
+            echo -e "\033[1;33m[*] Starting MariaDB to drop databases...\033[0m"
+            if start_mariadb_background; then
+                # Drop every non-system database
+                DBS=$("$MYSQL_CLI" --socket="$MARIADB_SOCKET" -N -B -e \
+                    "SHOW DATABASES WHERE \`Database\` NOT IN ('mysql','information_schema','performance_schema','sys');" 2>/dev/null)
+                for db in $DBS; do
+                    [ -z "$db" ] && continue
+                    echo -e "  \033[1;31m✗\033[0m Dropping database: \033[1;33m$db\033[0m"
+                    "$MYSQL_CLI" --socket="$MARIADB_SOCKET" -e "DROP DATABASE IF EXISTS \`$db\`;" 2>/dev/null
+                done
+                echo -e "\033[1;32m[OK] All user databases dropped.\033[0m"
+                stop_mariadb_cleanly
+            fi
+
+            echo -e "\033[1;33m[*] Removing configuration files...\033[0m"
             rm -rf "$PREFIX/etc/nginx/ssl"
             rm -f "$PREFIX/etc/nginx/nginx.conf"
             rm -f "$PREFIX/etc/php-fpm.d/www.conf"
@@ -1641,25 +1400,21 @@ uninstall_server() {{
                 rm -f "$PHP_CONFD_DIR/$ext.ini"
             done
 
-            read -p "Delete web root ($HTDOCS_DIR)? (y/N): " del_web
-            case "$del_web" in
-                [yY][eE][sS]|[yY])
-                    rm -rf "$HTDOCS_DIR"
-                    echo -e "\033[1;32m[OK] Web root deleted.\033[0m"
-                    ;;
-                *)
-                    echo -e "\033[1;36m[INFO] Web root preserved.\033[0m"
-                    ;;
-            esac
+            echo -e "\033[1;33m[*] Removing MariaDB data directory...\033[0m"
+            rm -rf "$MYSQL_DATA_DIR"
+            rm -rf "$MYSQL_RUN_DIR"
+            echo -e "\033[1;32m[OK] MariaDB data wiped.\033[0m"
+
+            echo -e "\033[1;33m[*] Removing web root and its contents...\033[0m"
+            rm -rf "$HTDOCS_DIR"
+            echo -e "\033[1;32m[OK] Web root deleted.\033[0m"
 
             rm -f "$PREFIX/bin/myserver"
-            echo -e "\033[1;32m[OK] Uninstalled.\033[0m"
+            echo ""
+            echo -e "\033[1;32m[✓] Uninstalled completely.\033[0m"
             exit 0
             ;;
-        *)
-            echo -e "\033[1;36m[INFO] Cancelled.\033[0m"
-            sleep 1
-            ;;
+        *) echo -e "\033[1;36m[INFO] Uninstall cancelled.\033[0m"; sleep 1 ;;
     esac
 }}
 
@@ -1668,7 +1423,7 @@ if [ -n "$1" ]; then
         start) start_services ;;
         stop) stop_services ;;
         restart) restart_services ;;
-        status) show_banner_and_status; read -p "Press Enter to continue..." ;;
+        status) show_banner_and_status; read -p "Press Enter..." ;;
         quickstart) quickstart_menu ;;
         update) update_server manual ;;
         reinstall) reinstall_server ;;
@@ -1688,7 +1443,6 @@ fi
 
 while true; do
     show_banner_and_status
-
     if pgrep -f nginx > /dev/null || pgrep -f php-fpm > /dev/null || pgrep -f "mariadb|mysqld" > /dev/null || pgrep -f redis-server > /dev/null; then
         SERVER_RUNNING=1
     else
@@ -1698,42 +1452,27 @@ while true; do
     if [ "$SERVER_RUNNING" -eq 1 ]; then
         echo -e "\033[1;33mSelect an option:\033[0m"
         echo -e "\033[1;33m 1) stop             (Stop all services)\033[0m"
-        if is_tunnel_running; then
-            echo -e "\033[1;33m 2) Disable Internet (disable internet access)\033[0m"
-        else
-            echo -e "\033[1;33m 2) Enable Internet  (enable internet access)\033[0m"
-        fi
+        is_tunnel_running && echo -e "\033[1;33m 2) Disable Internet (disable internet access)\033[0m" || echo -e "\033[1;33m 2) Enable Internet  (enable internet access)\033[0m"
         echo -e "\033[1;33m 3) restart          (Restart all services)\033[0m"
         echo -e "\033[1;33m 4) quickstart       (Install WP / Laravel / Nextcloud)\033[0m"
         echo -e "\033[1;33m 5) refresh status   (Re-check server status)\033[0m"
         echo -e "\033[1;33m 6) update           (Check and apply updates)\033[0m"
-        echo -e "\033[1;33m 7) reinstall        (To fix issues)\033[0m"
-        echo -e "\033[1;33m 8) uninstall        (Remove server stack)\033[0m"
+        echo -e "\033[1;33m 7) reinstall        (To fix issues — keeps DBs + htdocs)\033[0m"
+        echo -e "\033[1;33m 8) uninstall        (Remove server + DBs + htdocs)\033[0m"
         echo -e "\033[1;33m 9) exit             (Exit & Stop Server)\033[0m"
         echo ""
         read -p $'\033[1;33mEnter choice [1-9]: \033[0m' choice
-
         case "$choice" in
             1|stop) stop_services ;;
-            2)
-                if is_tunnel_running; then
-                    disable_internet
-                else
-                    enable_internet
-                fi
-                ;;
+            2) is_tunnel_running && disable_internet || enable_internet ;;
             3|restart) restart_services ;;
             4|quickstart) quickstart_menu ;;
             5|refresh) continue ;;
             6|update) update_server manual ;;
             7|reinstall) reinstall_server ;;
             8|uninstall|delete) uninstall_server ;;
-            9|exit)
-                stop_services
-                echo -e "\033[1;32mServer stopped and exited successfully.\033[0m"
-                exit 0
-                ;;
-            *) echo -e "\033[1;31mInvalid choice!\033[0m"; sleep 1 ;;
+            9|exit) stop_services; echo -e "\033[1;32mServer stopped.\033[0m"; exit 0 ;;
+            *) echo -e "\033[1;31mInvalid.\033[0m"; sleep 1 ;;
         esac
     else
         echo -e "\033[1;33mSelect an option:\033[0m"
@@ -1741,12 +1480,11 @@ while true; do
         echo -e "\033[1;33m 2) quickstart       (Install WP / Laravel / Nextcloud)\033[0m"
         echo -e "\033[1;33m 3) refresh status   (Re-check server status)\033[0m"
         echo -e "\033[1;33m 4) update           (Check and apply updates)\033[0m"
-        echo -e "\033[1;33m 5) reinstall        (To fix issues)\033[0m"
-        echo -e "\033[1;33m 6) uninstall        (Remove server stack)\033[0m"
+        echo -e "\033[1;33m 5) reinstall        (To fix issues — keeps DBs + htdocs)\033[0m"
+        echo -e "\033[1;33m 6) uninstall        (Remove server + DBs + htdocs)\033[0m"
         echo -e "\033[1;33m 7) exit\033[0m"
         echo ""
         read -p $'\033[1;33mEnter choice [1-7]: \033[0m' choice
-
         case "$choice" in
             1|start) start_services ;;
             2|quickstart) quickstart_menu ;;
@@ -1754,11 +1492,8 @@ while true; do
             4|update) update_server manual ;;
             5|reinstall) reinstall_server ;;
             6|uninstall|delete) uninstall_server ;;
-            7|exit)
-                echo -e "\033[1;32mBye!\033[0m"
-                exit 0
-                ;;
-            *) echo -e "\033[1;31mInvalid choice!\033[0m"; sleep 1 ;;
+            7|exit) echo -e "\033[1;32mBye!\033[0m"; exit 0 ;;
+            *) echo -e "\033[1;31mInvalid.\033[0m"; sleep 1 ;;
         esac
     fi
 done
@@ -1773,9 +1508,9 @@ done
         return False
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # Cleanup
-# ---------------------------------------------------------------------------
+# ===========================================================================
 def cleanup_repository():
     try:
         cwd = Path.cwd().resolve()
@@ -1784,15 +1519,11 @@ def cleanup_repository():
                      Path('/data/data/com.termux/files')}
         if cwd in forbidden:
             return
-        install_py = cwd / "install_server.py"
-        git_dir = cwd / ".git"
-        if not install_py.exists() or not git_dir.exists():
+        if not (cwd / "install_server.py").exists() or not (cwd / ".git").exists():
             return
         try:
-            result = subprocess.run(
-                ["git", "-C", str(cwd), "remote", "-v"],
-                capture_output=True, text=True, timeout=5
-            )
+            result = subprocess.run(["git", "-C", str(cwd), "remote", "-v"],
+                                    capture_output=True, text=True, timeout=5)
             if "elias0esmail/termux-web-server" not in result.stdout:
                 return
         except Exception:
@@ -1805,16 +1536,28 @@ def cleanup_repository():
         print(f"\033[1;31m [!] Cleanup notice: {e}\033[0m")
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # Main
-# ---------------------------------------------------------------------------
+# ===========================================================================
 def main():
-    global HTDOCS_DIR, DB_ROOT_PASSWORD
+    global HTDOCS_DIR, DB_ROOT_PASSWORD, REINSTALL_MODE
 
     try:
-        print(f"\033[1;33m[+] Deploying Advanced Nginx + PHP-FPM Server Stack v{CURRENT_VERSION}...\033[0m")
+        # --- Detect reinstall mode ---
+        existing_data = (MYSQL_DATA_DIR / "mysql").exists()
+        existing_cnf = MY_CNF_FILE.exists()
+        REINSTALL_MODE = existing_data and existing_cnf
+        if os.environ.get("MYSERVER_REINSTALL") == "1":
+            REINSTALL_MODE = True
 
-        # --- Ensure fzf exists BEFORE asking any question ---
+        if REINSTALL_MODE:
+            print(f"\033[1;33m[+] Reinstall mode — v{CURRENT_VERSION} \033[0m")
+            print("\033[1;32m [✓] Databases will be preserved \033[0m")
+            print("\033[1;32m [✓] htdocs will be preserved \033[0m")
+            print("\033[1;33m [↻] phpMyAdmin will be refreshed \033[0m")
+        else:
+            print(f"\033[1;33m[+] Deploying Advanced Nginx + PHP-FPM Server Stack v{CURRENT_VERSION}...\033[0m")
+
         ensure_fzf()
 
         # --- Resolve web root ---
@@ -1827,8 +1570,7 @@ def main():
 
         if saved_path:
             HTDOCS_DIR = Path(saved_path)
-            print(f"\033[1;36m [i] Using saved web root: {HTDOCS_DIR} \033[0m")
-            print(f"\033[1;33m     (Delete {HTDOCS_PATH_FILE} to change it) \033[0m")
+            print(f"\033[1;36m [i] Web root: {HTDOCS_DIR} \033[0m")
         else:
             HTDOCS_DIR = ask_web_root_location()
             try:
@@ -1838,34 +1580,39 @@ def main():
                 pass
             print(f"\033[1;32m [✓] Web root set to: {HTDOCS_DIR} \033[0m")
 
-        # --- Ask DB password ---
-        print()
-        DB_ROOT_PASSWORD = ask_db_password()
-        if DB_ROOT_PASSWORD:
-            print("\033[1;32m [✓] MariaDB root password will be set. \033[0m")
+        # --- Password prompt (fresh only) ---
+        if REINSTALL_MODE:
+            DB_ROOT_PASSWORD = read_password_from_my_cnf()
+            if DB_ROOT_PASSWORD:
+                print("\033[1;36m [i] Reusing existing MariaDB password from ~/.my.cnf \033[0m")
+            else:
+                print("\033[1;36m [i] MariaDB root has no password (preserved). \033[0m")
         else:
-            print("\033[1;33m [i] MariaDB root will have NO password. \033[0m")
-        print()
+            print()
+            DB_ROOT_PASSWORD = ask_db_password()
+            if DB_ROOT_PASSWORD:
+                print("\033[1;32m [✓] MariaDB root password will be set. \033[0m")
+            else:
+                print("\033[1;33m [i] MariaDB root will have NO password. \033[0m")
+            print()
 
         # --- Pre-flight php.ini cleanup ---
         ini_path = get_php_ini_path()
         if ini_path.exists():
             removed = clean_php_ini_legacy(ini_path)
             if removed:
-                print(f"\033[1;33m [*] Pre-flight: removed {removed} legacy 'extension=' line(s) from php.ini \033[0m")
+                print(f"\033[1;33m [*] Removed {removed} legacy 'extension=' line(s). \033[0m")
 
         php_ext_pkgs = " ".join(sorted(set(PHP_EXT_PACKAGES.values())))
-        core_pkgs = (
-            "nginx php php-fpm mariadb redis openssl-tool "
-            "curl tar unzip git wget cloudflared fzf"
-        )
+        core_pkgs = ("nginx php php-fpm mariadb redis openssl-tool "
+                     "curl tar unzip git wget cloudflared fzf")
         install_cmd = f"pkg install -y {core_pkgs} {php_ext_pkgs}"
 
         steps = [
             ("Updating Packages", "pkg update -y"),
             ("Storage Setup", None),
             ("Installing Core Software", install_cmd),
-            ("MariaDB Hardened Initialization", setup_mariadb),
+            ("MariaDB Initialization", setup_mariadb),
             ("Redis Setup", setup_redis),
             ("PHP-FPM Configuration", setup_php_fpm),
             ("SSL Certificate Setup", setup_ssl),
@@ -1878,7 +1625,6 @@ def main():
 
         for i, (desc, action) in enumerate(steps, 1):
             print(f"\033[1;34m[{i}/{len(steps)}] {desc}...\033[0m")
-
             if desc == "Storage Setup":
                 if not (HOME / "storage").exists() and "storage" in str(HTDOCS_DIR):
                     subprocess.run("termux-setup-storage", shell=True)
@@ -1890,7 +1636,6 @@ def main():
                 run_cmd(action)
 
         enforce_htdocs_permissions()
-
         print_htdocs_diagnostic()
         if not verify_htdocs_readable():
             print("\033[1;33m [!] Web root readability check FAILED. \033[0m")
@@ -1904,15 +1649,11 @@ def main():
         else:
             print("\033[1;32m [✓] MariaDB stopped cleanly. \033[0m")
 
-        print("\n\033[1;32m[✓] Server Stack Deployed Successfully!\033[0m")
+        print(f"\n\033[1;32m[✓] {'Reinstall' if REINSTALL_MODE else 'Server Stack Deployed'} Successfully!\033[0m")
         print(f"\033[1;36mWeb Root: {HTDOCS_DIR}\033[0m")
         print("HTTP URL:  http://localhost:8080")
         print("HTTPS URL: https://localhost:8443")
         print("phpMyAdmin: http://localhost:8080/phpmyadmin")
-        if DB_ROOT_PASSWORD:
-            print("\033[1;36mDB Login:  root / (your chosen password)\033[0m")
-        else:
-            print("\033[1;36mDB Login:  root / (empty)\033[0m")
         print("\n\033[1;35mType 'myserver' anytime to open the interactive manager.\033[0m\n")
 
         cleanup_repository()
