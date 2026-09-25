@@ -12,16 +12,16 @@ import getpass
 from pathlib import Path
 
 # Current Version & Release Notes
-CURRENT_VERSION = "2.18.1"
+CURRENT_VERSION = "2.18.2"
 CHANGELOG = [
-    "Fix: Bullet-proof arrow-key menu (save/restore cursor, no line counting)",
-    "Fix: Menu selection highlighted in cyan; short labels only (no full paths)",
+    "Fix: Arrow-key menu now uses fzf (bullet-proof, no repeated printing)",
+    "Fix: Menu selection highlighted in cyan; short labels only",
+    "New: fzf auto-installed with core packages",
     "Fix: (carried) phpMyAdmin 503 — no rate limit on /phpmyadmin",
     "New: (carried) phpMyAdmin config storage auto-setup",
     "New: (carried) Auto-open http://localhost:8080 on 'myserver start'",
     "Fix: (carried) Nginx FUSE-safe directory handling",
     "Security: (carried) PHP path traversal fix + AllowNoPassword logic",
-    "Fix: (carried) MariaDB stopped cleanly after installation",
 ]
 
 PREFIX = Path(os.environ.get('PREFIX', '/data/data/com.termux/files/usr'))
@@ -80,91 +80,93 @@ def is_process_running(pattern: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Interactive arrow-key menu (bullet-proof rendering)
+# Interactive arrow-key menu via fzf
 # ---------------------------------------------------------------------------
+def ensure_fzf() -> bool:
+    """Make sure fzf is installed. Returns True if available."""
+    if command_exists("fzf"):
+        return True
+    print("\033[1;33m[*] Installing fzf (one-time)...\033[0m")
+    r = subprocess.run("pkg install -y fzf", shell=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if r.returncode == 0 and command_exists("fzf"):
+        print("\033[1;32m [✓] fzf installed. \033[0m")
+        return True
+    return False
+
+
 def choose_option(title: str, options: list, default: int = 0) -> int:
     """
-    Bullet-proof arrow-key menu using save/restore cursor + clear-below.
+    Show an interactive arrow-key menu using fzf.
 
-    Uses ANSI:
-      \\033[s   -> save cursor position
-      \\033[u   -> restore cursor position
-      \\033[J   -> clear from cursor to end of screen
-    This is immune to line wrapping and other processes writing to the
-    same terminal, unlike line-counting approaches.
+    - Options are prefixed with a hidden index ("N\\tlabel") and passed
+      via stdin. fzf hides the prefix with --with-nth=2.. and returns the
+      full chosen line; we parse the index back.
+
+    - If fzf is not available, falls back to numeric input.
     """
-    if not sys.stdin.isatty():
-        # Non-interactive fallback
-        print(f"\033[1;36m{title}\033[0m")
-        for i, opt in enumerate(options, 1):
-            print(f"  {i}) {opt}")
+    if not options:
+        return 0
+    if len(options) == 1:
+        return 0
+
+    if ensure_fzf():
+        # Build stdin: "INDEX<TAB>LABEL", one per line.
+        # Put default option first so fzf starts focused on it.
+        lines = [f"{i}\t{opt}" for i, opt in enumerate(options)]
+        reordered = [lines[default]] + [l for i, l in enumerate(lines) if i != default]
+        input_text = "\n".join(reordered) + "\n"
+
         try:
-            raw = input(f"\033[1;33mSelect [1-{len(options)}]: \033[0m").strip()
-            n = int(raw) if raw else default + 1
-            return max(0, min(len(options) - 1, n - 1))
+            result = subprocess.run(
+                [
+                    "fzf",
+                    "--height=40%",
+                    "--reverse",
+                    "--no-multi",
+                    "--no-info",
+                    "--with-nth=2..",            # hide the "N\t" prefix
+                    "--delimiter=\t",
+                    "--header=" + title,
+                    "--pointer=❯",
+                    "--prompt=  ",
+                    "--color=pointer:cyan,fg+:cyan,header:yellow",
+                ],
+                input=input_text,
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0 or not result.stdout.strip():
+                return default
+            chosen_line = result.stdout.strip()
+            idx_str = chosen_line.split("\t", 1)[0]
+            try:
+                idx = int(idx_str)
+                if 0 <= idx < len(options):
+                    return idx
+            except ValueError:
+                pass
+            return default
         except Exception:
             return default
 
-    import tty
-    import termios
-
-    fd = sys.stdin.fileno()
-    old_settings = termios.tcgetattr(fd)
-    N = len(options)
-    idx = default
-
-    # Print title + save cursor at the position where options will be drawn
-    sys.stdout.write(f"\033[1;36m{title}\033[0m\n")
-    sys.stdout.write("\033[s")          # <-- save cursor here
-    sys.stdout.flush()
-
-    def render():
-        # Restore to saved row, clear everything below, redraw
-        sys.stdout.write("\033[u")      # restore cursor
-        sys.stdout.write("\033[J")      # clear to end of screen
-        for i, opt in enumerate(options):
-            if i == idx:
-                # Cyan highlight
-                sys.stdout.write(f"  \033[1;36m❯ {opt}\033[0m\n")
-            else:
-                sys.stdout.write(f"    {opt}\n")
-        sys.stdout.write("\033[1;33m  ↑/↓ move · Enter select\033[0m\n")
-        sys.stdout.flush()
-
-    sys.stdout.write("\033[?25l")       # hide cursor
-    sys.stdout.flush()
-    render()
-
+    # --- Fallback: numeric input ---
+    print(f"\033[1;36m{title}\033[0m")
+    for i, opt in enumerate(options, 1):
+        marker = "❯" if i - 1 == default else " "
+        print(f"  {marker} {i}) {opt}")
     try:
-        tty.setcbreak(fd)
-        while True:
-            ch = sys.stdin.read(1)
-            if ch == '\x1b':
-                ch2 = sys.stdin.read(1)
-                if ch2 == '[':
-                    ch3 = sys.stdin.read(1)
-                    if ch3 == 'A':          # Up arrow
-                        idx = (idx - 1) % N
-                        render()
-                    elif ch3 == 'B':        # Down arrow
-                        idx = (idx + 1) % N
-                        render()
-            elif ch in ('\r', '\n'):        # Enter
-                break
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-        # Move cursor below the menu and show it again
-        sys.stdout.write("\033[u")                  # restore to start
-        sys.stdout.write(f"\033[{N + 1}B")          # move down past menu + hint
-        sys.stdout.write("\n")
-        sys.stdout.write("\033[?25h")               # show cursor
-        sys.stdout.flush()
-
-    return idx
+        raw = input(f"\033[1;33mSelect [1-{len(options)}] (default {default+1}): \033[0m").strip()
+        if not raw:
+            return default
+        n = int(raw)
+        return max(0, min(len(options) - 1, n - 1))
+    except Exception:
+        return default
 
 
 def ask_web_root_location() -> Path:
-    """Prompt user to choose the web root directory (short labels only)."""
+    """Prompt user to choose the web root directory."""
     home_path = HOME / "htdocs"
     storage_path = HOME / "storage/shared/htdocs"
 
@@ -506,7 +508,6 @@ def setup_mariadb():
             )
             print("\033[1;36m [i] MariaDB root has no password. \033[0m")
 
-        # Leave MariaDB running — later steps (phpMyAdmin storage) need it.
         return True
     except Exception as e:
         print(f"\033[1;31m [!] MariaDB init error: {e}\033[0m")
@@ -624,7 +625,7 @@ IP.2 = ::1
 
 
 # ---------------------------------------------------------------------------
-# Nginx (no rate limit on phpMyAdmin)
+# Nginx
 # ---------------------------------------------------------------------------
 def setup_nginx():
     try:
@@ -889,7 +890,6 @@ $cfg['Servers'][$i]['export_templates'] = 'pma__export_templates';
 
 
 def setup_phpmyadmin_storage(pma_dir: Path) -> bool:
-    """Create the 'phpmyadmin' DB and import its config-storage tables."""
     sock = PREFIX / "var/run/mysqld/mysqld.sock"
     sql_create_tables = pma_dir / "sql" / "create_tables.sql"
 
@@ -1814,6 +1814,9 @@ def main():
     try:
         print(f"\033[1;33m[+] Deploying Advanced Nginx + PHP-FPM Server Stack v{CURRENT_VERSION}...\033[0m")
 
+        # --- Ensure fzf exists BEFORE asking any question ---
+        ensure_fzf()
+
         # --- Resolve web root ---
         saved_path = None
         if HTDOCS_PATH_FILE.exists():
@@ -1854,7 +1857,7 @@ def main():
         php_ext_pkgs = " ".join(sorted(set(PHP_EXT_PACKAGES.values())))
         core_pkgs = (
             "nginx php php-fpm mariadb redis openssl-tool "
-            "curl tar unzip git wget cloudflared"
+            "curl tar unzip git wget cloudflared fzf"
         )
         install_cmd = f"pkg install -y {core_pkgs} {php_ext_pkgs}"
 
@@ -1894,7 +1897,6 @@ def main():
         else:
             print("\033[1;32m [✓] Web root is readable by all users. \033[0m")
 
-        # Final: stop MariaDB cleanly
         print("\033[1;34m[+] Stopping MariaDB (post-install)...\033[0m")
         stop_mariadb_cleanly()
         if is_process_running("mariadbd") or is_process_running("mysqld"):
