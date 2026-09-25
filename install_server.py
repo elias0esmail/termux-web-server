@@ -11,13 +11,18 @@ import string
 from pathlib import Path
 
 # Current Version & Release Notes
-CURRENT_VERSION = "2.12.0"
+CURRENT_VERSION = "2.13.0"
 CHANGELOG = [
-    "Fix: PHP extension warnings (use conf.d auto-loading)",
-    "Fix: MariaDB no longer stays running after installation",
-    "Fix: Graceful shutdown kills supervisor processes first",
-    "Improvement: Auto-detect missing PHP extensions with install hint",
-    "Improvement: Post-install MariaDB state verification",
+    "Fix: PHP extension warnings via conf.d auto-generated .ini files",
+    "Fix: Auto-clean legacy 'extension=' lines from php.ini",
+    "Fix: Explicit extension_dir set in php.ini",
+    "Fix: Remove stale conf.d .ini for extensions no longer installed",
+    "Improvement: Post-install extension inventory report",
+    "Improvement: Startup php.ini hygiene check before install",
+    "Security: (carried) PHP path traversal fix (try_files =404)",
+    "Security: (carried) phpMyAdmin AllowNoPassword disabled",
+    "Fix: (carried) MariaDB stopped cleanly after installation",
+    "Fix: (carried) Graceful shutdown kills supervisors first",
 ]
 
 # System and Environment Paths
@@ -26,6 +31,8 @@ HOME = Path.home()
 HTDOCS_DIR = HOME / "storage/shared/htdocs"
 NGINX_DIR = PREFIX / "etc/nginx"
 PHP_FPM_DIR = PREFIX / "etc/php-fpm.d"
+PHP_CONFD_DIR = PREFIX / "etc/php/conf.d"
+PHP_LIB_DIR = PREFIX / "lib/php"
 SSL_DIR = NGINX_DIR / "ssl"
 TMP_DIR = PREFIX / "tmp"
 VERSION_FILE = PREFIX / "etc/myserver_version"
@@ -57,7 +64,6 @@ def command_exists(cmd):
 
 
 def is_process_running(pattern: str) -> bool:
-    """Portable process check (Termux has pgrep)."""
     r = subprocess.run(f"pgrep -f '{pattern}'", shell=True,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return r.returncode == 0
@@ -68,9 +74,12 @@ def get_php_ini_path() -> Path:
     try:
         result = subprocess.run(["php", "--ini"], capture_output=True, text=True)
         if result.returncode == 0:
-            p = result.stdout.strip()
-            if p:
-                return Path(p)
+            # Output can contain multiple lines (warnings + paths). Find the
+            # one that looks like a real path and ends with php.ini
+            for line in result.stdout.splitlines():
+                line = line.strip()
+                if line.endswith("php.ini") and line.startswith("/"):
+                    return Path(line)
     except Exception:
         pass
     for candidate in [
@@ -84,24 +93,52 @@ def get_php_ini_path() -> Path:
 
 
 def get_php_confd_dir() -> Path:
-    return PREFIX / "etc/php/conf.d"
+    return PHP_CONFD_DIR
+
+
+def php_ext_so_exists(name: str) -> bool:
+    """True only if the actual .so file exists on disk."""
+    if not PHP_LIB_DIR.exists():
+        return False
+    return (PHP_LIB_DIR / f"{name}.so").exists()
 
 
 def php_ext_installed(name: str) -> bool:
-    """True if the extension .so exists OR a conf.d ini references it."""
-    so_path = PREFIX / "lib/php" / f"{name}.so"
-    if so_path.exists():
+    """True if .so exists OR a conf.d ini references it."""
+    if php_ext_so_exists(name):
         return True
     confd = get_php_confd_dir()
     if confd.exists():
-        for ini in confd.glob("*.ini"):
-            try:
-                if re.search(rf"^\s*extension\s*=\s*{re.escape(name)}\b",
-                             ini.read_text(), re.MULTILINE):
-                    return True
-            except Exception:
-                continue
+        ini = confd / f"{name}.ini"
+        if ini.exists():
+            return True
     return False
+
+
+def clean_php_ini_legacy(ini_path: Path) -> int:
+    """
+    Remove legacy 'extension=...' lines from php.ini that cause PHP startup
+    warnings when the corresponding .so is not present.
+
+    Returns the number of lines removed.
+    """
+    if not ini_path.exists():
+        return 0
+    try:
+        content = ini_path.read_text()
+    except Exception:
+        return 0
+
+    # Match lines like: extension=foo  or  extension=foo.so  (not commented)
+    new_content, n = re.subn(
+        r"^[ \t]*extension[ \t]*=[ \t]*[^\r\n]*[\r\n]?",
+        "",
+        content,
+        flags=re.MULTILINE,
+    )
+    if n > 0:
+        ini_path.write_text(new_content)
+    return n
 
 
 # ---------------------------------------------------------------------------
@@ -110,10 +147,7 @@ def php_ext_installed(name: str) -> bool:
 def setup_mariadb():
     """
     Initialize MariaDB, apply security hardening, then STOP it cleanly.
-
-    IMPORTANT: We use `mariadbd` directly (NOT `mariadbd-safe`) because
-    `mariadbd-safe` is a supervisor that auto-restarts mariadbd after a
-    graceful shutdown, leaving the daemon running after installation.
+    Uses `mariadbd` directly (NOT the supervisor) so shutdown is final.
     """
     try:
         data_dir = PREFIX / "var/lib/mysql"
@@ -132,7 +166,6 @@ def setup_mariadb():
             run_cmd(f"mariadb-install-db --datadir='{data_dir}'")
             print("\033[1;32m [✓] MariaDB database initialized. \033[0m")
 
-        # --- Launch bare mariadbd (no supervisor) ---
         cmd = f"mariadbd --datadir='{data_dir}' --socket='{sock_path}'"
         subprocess.Popen(cmd, shell=True,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -154,12 +187,10 @@ def setup_mariadb():
             run_cmd(f"mysql -u root --socket='{sock_path}' -e \"{sec_sql}\"")
             print("\033[1;32m [✓] MariaDB Security Hardening applied. \033[0m")
 
-        # --- Graceful shutdown ---
         run_cmd(f"mysqladmin --socket='{sock_path}' shutdown")
         time.sleep(2)
 
-        # --- Belt-and-braces cleanup: kill any supervisor FIRST ---
-        # (otherwise it would respawn mariadbd right after we kill it)
+        # Kill supervisors FIRST (otherwise they respawn mariadbd)
         for pattern in ("mariadbd-safe", "mysqld_safe"):
             run_cmd(f"pkill -TERM -f '{pattern}'")
         time.sleep(1)
@@ -169,7 +200,6 @@ def setup_mariadb():
         for pattern in ("mariadbd-safe", "mysqld_safe", "mariadbd", "mysqld"):
             run_cmd(f"pkill -KILL -f '{pattern}'")
 
-        # --- Verify clean shutdown ---
         if is_process_running("mariadbd") or is_process_running("mysqld"):
             print("\033[1;33m [!] Warning: MariaDB still running after shutdown.\033[0m")
         else:
@@ -452,12 +482,26 @@ http {{
 
 
 # ---------------------------------------------------------------------------
-# php.ini  (no manual extension= lines -> relies on conf.d auto-loading)
+# php.ini  +  conf.d management
 # ---------------------------------------------------------------------------
 def create_php_ini():
+    """
+    1. Clean legacy 'extension=' lines from php.ini (source of warnings).
+    2. Write a fresh php.ini with extension_dir set correctly.
+    3. Generate per-extension .ini files in conf.d for every .so that
+       actually exists on disk.
+    4. Remove stale conf.d .ini files for extensions that are gone.
+    """
     php_ini_path = get_php_ini_path()
+    PHP_CONFD_DIR.mkdir(parents=True, exist_ok=True)
     TMP_DIR.mkdir(parents=True, exist_ok=True)
 
+    # --- 1. Clean up legacy lines ---
+    removed = clean_php_ini_legacy(php_ini_path)
+    if removed:
+        print(f"\033[1;33m [*] Removed {removed} legacy 'extension=' line(s) from php.ini \033[0m")
+
+    # --- 2. Write clean php.ini ---
     php_ini_content = f"""\
 upload_max_filesize = 512M
 post_max_size = 512M
@@ -466,6 +510,11 @@ max_execution_time = 300
 error_reporting = E_ALL & ~E_DEPRECATED
 display_errors = On
 date.timezone = UTC
+
+; --- Extensions ---
+; Explicit path so PHP finds the .so files installed by php-* packages.
+extension_dir = "{PHP_LIB_DIR}"
+; NOTE: Do NOT add `extension=` lines here. conf.d/*.ini handles them.
 
 ; Security: prevent path traversal in FPM
 cgi.fix_pathinfo=0
@@ -480,28 +529,46 @@ session.auto_start = 0
 session.cookie_lifetime = 0
 session.cookie_path = /
 session.gc_maxlifetime = 1440
-
-; NOTE: Extensions are auto-loaded from $PREFIX/etc/php/conf.d/*.ini
-; (installed by the php-* packages). Do NOT add `extension=` lines here,
-; otherwise PHP warns when the corresponding .so is missing.
 """
     try:
         php_ini_path.parent.mkdir(parents=True, exist_ok=True)
         php_ini_path.write_text(php_ini_content)
         print(f"\033[1;32m [✓] php.ini updated at {php_ini_path}. \033[0m")
-
-        # --- Report missing extensions with an install hint ---
-        missing = [ext for ext in PHP_EXT_PACKAGES if not php_ext_installed(ext)]
-        if missing:
-            pkgs = " ".join(PHP_EXT_PACKAGES[m] for m in missing)
-            print(f"\033[1;33m [!] Missing PHP extensions: {', '.join(missing)}\033[0m")
-            print(f"\033[1;33m     Install with: pkg install {pkgs}\033[0m")
-        else:
-            print("\033[1;32m [✓] All recommended PHP extensions detected. \033[0m")
-        return True
     except Exception as e:
         print(f"\033[1;31m [!] php.ini error: {e}\033[0m")
         return False
+
+    # --- 3. Regenerate conf.d .ini files ---
+    installed_exts = []
+    missing_exts = []
+    for ext in PHP_EXT_PACKAGES:
+        ini_file = PHP_CONFD_DIR / f"{ext}.ini"
+        if php_ext_so_exists(ext):
+            # Write or refresh
+            desired = f"extension={ext}.so\n"
+            try:
+                if not ini_file.exists() or ini_file.read_text() != desired:
+                    ini_file.write_text(desired)
+            except Exception:
+                pass
+            installed_exts.append(ext)
+        else:
+            # Remove stale conf.d file to silence warnings
+            try:
+                if ini_file.exists():
+                    ini_file.unlink()
+            except Exception:
+                pass
+            missing_exts.append(ext)
+
+    if installed_exts:
+        print(f"\033[1;32m [✓] Enabled PHP extensions: {', '.join(installed_exts)} \033[0m")
+    if missing_exts:
+        pkgs = " ".join(PHP_EXT_PACKAGES[m] for m in missing_exts)
+        print(f"\033[1;33m [!] Missing PHP extensions: {', '.join(missing_exts)}\033[0m")
+        print(f"\033[1;33m     Install with: pkg install {pkgs}\033[0m")
+
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -613,6 +680,8 @@ PREFIX="{PREFIX}"
 HTDOCS_DIR="{HTDOCS_DIR}"
 VERSION_FILE="{VERSION_FILE}"
 GITHUB_RAW_URL="{GITHUB_RAW_URL}"
+PHP_CONFD_DIR="{PHP_CONFD_DIR}"
+PHP_LIB_DIR="{PHP_LIB_DIR}"
 TUNNEL_PID_FILE="$PREFIX/tmp/cloudflared.pid"
 TUNNEL_URL_FILE="$PREFIX/tmp/cloudflared.url"
 TUNNEL_LOG="$PREFIX/tmp/cloudflared.log"
@@ -645,6 +714,19 @@ has_internet() {{
         return 0
     fi
     return 1
+}}
+
+sync_php_extensions() {{
+    # Regenerate conf.d/*.ini based on actual .so presence.
+    # This keeps PHP silent (no startup warnings) after package changes.
+    mkdir -p "$PHP_CONFD_DIR"
+    for ext in mysqli pdo_mysql mbstring openssl curl zip gd intl bcmath; do
+        if [ -f "$PHP_LIB_DIR/$ext.so" ]; then
+            echo "extension=$ext.so" > "$PHP_CONFD_DIR/$ext.ini"
+        else
+            rm -f "$PHP_CONFD_DIR/$ext.ini"
+        fi
+    done
 }}
 
 show_banner_and_status() {{
@@ -705,6 +787,8 @@ show_banner_and_status() {{
 }}
 
 start_services() {{
+    sync_php_extensions
+
     echo -e "\033[1;34m[+] Starting MariaDB...\033[0m"
     mkdir -p "$PREFIX/var/lib/mysql" "$PREFIX/var/run/mysqld"
     if ! pgrep -f "mariadb|mysqld" > /dev/null; then
@@ -770,7 +854,6 @@ stop_services() {{
     fi
     echo -e "\033[1;33m[*] Stopping all services (graceful)...\033[0m"
 
-    # --- MariaDB: graceful shutdown, then kill supervisors FIRST ---
     if [ -S "$MARIADB_SOCKET" ]; then
         mysqladmin --socket="$MARIADB_SOCKET" shutdown 2>/dev/null
         sleep 2
@@ -1139,6 +1222,11 @@ uninstall_server() {{
             rm -f "$VERSION_FILE"
             rm -f "$TUNNEL_PID_FILE" "$TUNNEL_URL_FILE" "$TUNNEL_LOG"
 
+            # Remove generated conf.d files (only ours)
+            for ext in mysqli pdo_mysql mbstring openssl curl zip gd intl bcmath; do
+                rm -f "$PHP_CONFD_DIR/$ext.ini"
+            done
+
             read -p "Delete web root ($HTDOCS_DIR)? (y/N): " del_web
             case "$del_web" in
                 [yY][eE][sS]|[yY])
@@ -1262,8 +1350,6 @@ done
 # Cleanup
 # ---------------------------------------------------------------------------
 def cleanup_repository():
-    """Only delete the CWD if we are CERTAIN it is a freshly-cloned copy
-    of the myserver repo."""
     try:
         cwd = Path.cwd().resolve()
         forbidden = {HOME, PREFIX, Path('/'), Path('/data'),
@@ -1302,7 +1388,13 @@ def main():
     try:
         print(f"\033[1;33m[+] Deploying Advanced Nginx + PHP-FPM Server Stack v{CURRENT_VERSION}...\033[0m")
 
-        # Build the pkg install line with all PHP extension packages
+        # --- Pre-flight: clean any legacy extension= lines before we start ---
+        ini_path = get_php_ini_path()
+        if ini_path.exists():
+            removed = clean_php_ini_legacy(ini_path)
+            if removed:
+                print(f"\033[1;33m [*] Pre-flight: removed {removed} legacy 'extension=' line(s) from php.ini \033[0m")
+
         php_ext_pkgs = " ".join(sorted(set(PHP_EXT_PACKAGES.values())))
         core_pkgs = (
             "nginx php php-fpm mariadb redis openssl-tool "
@@ -1338,7 +1430,7 @@ def main():
             elif isinstance(action, str):
                 run_cmd(action)
 
-        # Verify critical tools are present
+        # Verify critical tools
         missing = [c for c in ["nginx", "php", "php-fpm", "mysqld", "redis-server"]
                    if not command_exists(c)]
         if missing:
