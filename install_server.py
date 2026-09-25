@@ -12,23 +12,20 @@ import getpass
 from pathlib import Path
 
 # Current Version & Release Notes
-CURRENT_VERSION = "2.17.0"
+CURRENT_VERSION = "2.18.0"
 CHANGELOG = [
-    "New: Choose web root location (Termux home or Phone storage) via arrow-key menu",
-    "New: Optional MariaDB root password during installation (empty = none)",
-    "New: Dynamic interactive menu (hides Internet/restart when server stopped)",
-    "Fix: Removed 'fix-permissions' from menu (auto-fix still active on start)",
-    "Fix: (carried) Nginx FUSE-safe directory handling (no more Access denied)",
-    "Improvement: imagick active in conf.d (since 2.16.1)",
-    "Security: (carried) PHP path traversal fix + phpMyAdmin AllowNoPassword OFF",
+    "Fix: Clean arrow-key menu (no repeated prompt printing, no full paths)",
+    "Fix: phpMyAdmin 503 — removed aggressive rate limit on /phpmyadmin",
+    "New: phpMyAdmin config storage auto-setup (creates 'phpmyadmin' DB + tables)",
+    "New: Auto-open http://localhost:8080 on 'myserver start'",
+    "Fix: (carried) Nginx FUSE-safe directory handling",
+    "Security: (carried) PHP path traversal fix + AllowNoPassword logic",
     "Fix: (carried) MariaDB stopped cleanly after installation",
 ]
 
-# System and Environment Paths
 PREFIX = Path(os.environ.get('PREFIX', '/data/data/com.termux/files/usr'))
 HOME = Path.home()
 
-# HTDOCS_DIR is resolved at install time (may be changed by user choice)
 HTDOCS_DIR = HOME / "storage/shared/htdocs"
 HTDOCS_PATH_FILE = PREFIX / "etc/myserver_htdocs_path"
 
@@ -44,12 +41,8 @@ MY_CNF_FILE = HOME / ".my.cnf"
 
 GITHUB_RAW_URL = "https://raw.githubusercontent.com/elias0esmail/termux-web-server/main"
 
-# Set at install time (empty = no root password)
 DB_ROOT_PASSWORD = ""
 
-# ---------------------------------------------------------------------------
-# PHP extension inventory
-# ---------------------------------------------------------------------------
 PHP_EXPECTED_EXTENSIONS = [
     "mysqli", "pdo_mysql", "mbstring", "openssl",
     "curl", "zip", "xml", "intl", "bcmath",
@@ -86,11 +79,14 @@ def is_process_running(pattern: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Interactive arrow-key menu
+# Interactive arrow-key menu (clean rendering)
 # ---------------------------------------------------------------------------
 def choose_option(title: str, options: list, default: int = 0) -> int:
     """
-    Interactive menu with ↑/↓ + Enter. Falls back to numeric input if not a TTY.
+    Clean arrow-key menu:
+      - prints title and options ONCE
+      - on ↑/↓ only the option lines are redrawn (using ANSI clear-line + move-up)
+      - falls back to numeric input if stdin isn't a TTY
     """
     if not sys.stdin.isatty():
         print(f"\033[1;36m{title}\033[0m")
@@ -108,61 +104,75 @@ def choose_option(title: str, options: list, default: int = 0) -> int:
 
     fd = sys.stdin.fileno()
     old_settings = termios.tcgetattr(fd)
+    N = len(options)
     idx = default
-    lines_printed = 0
+
+    # Print title once
+    sys.stdout.write(f"\033[1;36m{title}\033[0m\n")
+    # Reserve N blank lines for options
+    for _ in range(N):
+        sys.stdout.write("\n")
+    # Print the hint line
+    sys.stdout.write("\033[1;33m  (Use ↑/↓ to move, Enter to select)\033[0m\n")
+    sys.stdout.flush()
+
+    # Cursor is now one line BELOW the hint.
+    # To reach the first option line we must move up (N + 1) lines.
+    def redraw():
+        sys.stdout.write(f"\033[{N + 1}A")  # up to first option line
+        for i, opt in enumerate(options):
+            sys.stdout.write("\033[2K")     # clear line
+            if i == idx:
+                sys.stdout.write(f"  \033[1;32m❯ {opt}\033[0m\n")
+            else:
+                sys.stdout.write(f"    {opt}\n")
+        # After loop, cursor sits on the hint line (1 line below last option).
+        # Move back up to the first option for the next redraw.
+        sys.stdout.write(f"\033[{N}A")
+        sys.stdout.flush()
 
     sys.stdout.write("\033[?25l")  # hide cursor
     sys.stdout.flush()
 
+    redraw()
+
     try:
         tty.setcbreak(fd)
         while True:
-            if lines_printed > 0:
-                sys.stdout.write(f"\033[{lines_printed}A")
-            sys.stdout.write("\033[J")  # clear below
-
-            lines = [f"\033[1;36m{title}\033[0m"]
-            for i, opt in enumerate(options):
-                if i == idx:
-                    lines.append(f"  \033[1;32m❯ {opt}\033[0m")
-                else:
-                    lines.append(f"    {opt}")
-            lines.append("\033[1;33m  (↑/↓ to move, Enter to select)\033[0m")
-
-            for line in lines:
-                sys.stdout.write(line + "\n")
-            sys.stdout.flush()
-            lines_printed = len(lines)
-
             ch = sys.stdin.read(1)
             if ch == '\x1b':
                 ch2 = sys.stdin.read(1)
                 if ch2 == '[':
                     ch3 = sys.stdin.read(1)
-                    if ch3 == 'A':
-                        idx = (idx - 1) % len(options)
-                    elif ch3 == 'B':
-                        idx = (idx + 1) % len(options)
+                    if ch3 == 'A':       # Up
+                        idx = (idx - 1) % N
+                        redraw()
+                    elif ch3 == 'B':     # Down
+                        idx = (idx + 1) % N
+                        redraw()
             elif ch in ('\r', '\n'):
                 break
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-        sys.stdout.write("\033[?25h\n")
+        sys.stdout.write("\033[?25h")  # show cursor
+        # Move cursor below the hint line and leave a clean newline.
+        sys.stdout.write(f"\033[{N + 1}B")
+        sys.stdout.write("\n")
         sys.stdout.flush()
 
     return idx
 
 
 def ask_web_root_location() -> Path:
-    """Prompt user to choose the web root directory."""
+    """Prompt user to choose the web root directory (names only, no paths)."""
     home_path = HOME / "htdocs"
     storage_path = HOME / "storage/shared/htdocs"
 
     idx = choose_option(
         "Where should the web root (htdocs) be created?",
         [
-            f"Termux home    → {home_path}",
-            f"Phone storage  → {storage_path}  (visible in Files app)",
+            "Termux home     (private, faster)",
+            "Phone storage   (visible in Files app)",
         ],
         default=0,
     )
@@ -170,7 +180,6 @@ def ask_web_root_location() -> Path:
 
 
 def ask_db_password() -> str:
-    """Prompt user for MariaDB root password. Empty = no password."""
     print("\033[1;36m[i] MariaDB root password\033[0m")
     print("\033[1;33m    Leave empty and press Enter for NO password (default)\033[0m")
     try:
@@ -190,14 +199,13 @@ def ask_db_password() -> str:
 
 
 # ---------------------------------------------------------------------------
-# .my.cnf helpers (used by CLI to authenticate without prompting)
+# .my.cnf helpers
 # ---------------------------------------------------------------------------
 def _sql_escape(s: str) -> str:
     return s.replace("\\", "\\\\").replace("'", "\\'")
 
 
 def write_my_cnf(password: str, sock_path: Path):
-    """Write ~/.my.cnf so mysql/mysqladmin authenticate automatically."""
     lines = ["[client]", "user = root"]
     if password:
         lines.append(f'password = "{password}"')
@@ -303,22 +311,6 @@ def clean_php_ini_legacy(ini_path: Path) -> int:
     return n
 
 
-def list_installed_php_packages() -> set:
-    pkgs = set()
-    try:
-        r = subprocess.run(
-            "pkg list-installed 2>/dev/null | grep '^php-'",
-            shell=True, capture_output=True, text=True, timeout=15
-        )
-        for ln in r.stdout.splitlines():
-            name = ln.split("/")[0].strip()
-            if name:
-                pkgs.add(name)
-    except Exception:
-        pass
-    return pkgs
-
-
 # ---------------------------------------------------------------------------
 # Web root helpers
 # ---------------------------------------------------------------------------
@@ -410,7 +402,52 @@ def print_htdocs_diagnostic():
 
 
 # ---------------------------------------------------------------------------
-# MariaDB
+# MariaDB lifecycle helpers
+# ---------------------------------------------------------------------------
+def start_mariadb_background():
+    """Start mariadbd-safe in the background (used during install)."""
+    data_dir = PREFIX / "var/lib/mysql"
+    run_dir = PREFIX / "var/run/mysqld"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    sock_path = run_dir / "mysqld.sock"
+    if sock_path.exists():
+        try:
+            sock_path.unlink()
+        except Exception:
+            pass
+
+    if command_exists("mariadbd-safe"):
+        cmd = f"mariadbd-safe --datadir='{data_dir}' --socket='{sock_path}'"
+    else:
+        cmd = f"mariadbd --datadir='{data_dir}' --socket='{sock_path}'"
+    subprocess.Popen(cmd, shell=True,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    for _ in range(15):
+        if sock_path.exists():
+            return True
+        time.sleep(1)
+    return sock_path.exists()
+
+
+def stop_mariadb_cleanly():
+    sock_path = PREFIX / "var/run/mysqld/mysqld.sock"
+    if sock_path.exists():
+        run_cmd(f"mysqladmin --socket='{sock_path}' shutdown")
+        time.sleep(2)
+    for pattern in ("mariadbd-safe", "mysqld_safe"):
+        run_cmd(f"pkill -TERM -f '{pattern}'")
+    time.sleep(1)
+    for pattern in ("mariadbd-safe", "mysqld_safe", "mariadbd", "mysqld"):
+        run_cmd(f"pkill -TERM -f '{pattern}'")
+    time.sleep(1)
+    for pattern in ("mariadbd-safe", "mysqld_safe", "mariadbd", "mysqld"):
+        run_cmd(f"pkill -KILL -f '{pattern}'")
+
+
+# ---------------------------------------------------------------------------
+# MariaDB setup
 # ---------------------------------------------------------------------------
 def setup_mariadb():
     try:
@@ -430,14 +467,9 @@ def setup_mariadb():
             run_cmd(f"mariadb-install-db --datadir='{data_dir}'")
             print("\033[1;32m [✓] MariaDB database initialized. \033[0m")
 
-        cmd = f"mariadbd --datadir='{data_dir}' --socket='{sock_path}'"
-        subprocess.Popen(cmd, shell=True,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-        for _ in range(15):
-            if sock_path.exists():
-                break
-            time.sleep(1)
+        if not start_mariadb_background():
+            print("\033[1;31m [!] Failed to start MariaDB. \033[0m")
+            return False
 
         if sock_path.exists():
             sec_sql = (
@@ -451,11 +483,8 @@ def setup_mariadb():
             run_cmd(f"mysql -u root --socket='{sock_path}' -e \"{sec_sql}\"")
             print("\033[1;32m [✓] MariaDB Security Hardening applied. \033[0m")
 
-        # Write ~/.my.cnf with the current (empty) password so we can
-        # authenticate while we change it.
         write_my_cnf("", sock_path)
 
-        # Apply the user-chosen password (if any)
         if DB_ROOT_PASSWORD:
             tmp_sql = TMP_DIR / "myserver_setpw.sql"
             TMP_DIR.mkdir(parents=True, exist_ok=True)
@@ -472,31 +501,13 @@ def setup_mariadb():
             write_my_cnf(DB_ROOT_PASSWORD, sock_path)
             print("\033[1;32m [✓] MariaDB root password set. \033[0m")
         else:
-            # Explicitly remove any previously-set password
             run_cmd(
                 f"mysql --socket='{sock_path}' -e "
                 f"\"ALTER USER 'root'@'localhost' IDENTIFIED BY ''; FLUSH PRIVILEGES;\""
             )
             print("\033[1;36m [i] MariaDB root has no password. \033[0m")
 
-        # Graceful shutdown (uses ~/.my.cnf)
-        run_cmd(f"mysqladmin --socket='{sock_path}' shutdown")
-        time.sleep(2)
-
-        for pattern in ("mariadbd-safe", "mysqld_safe"):
-            run_cmd(f"pkill -TERM -f '{pattern}'")
-        time.sleep(1)
-        for pattern in ("mariadbd-safe", "mysqld_safe", "mariadbd", "mysqld"):
-            run_cmd(f"pkill -TERM -f '{pattern}'")
-        time.sleep(1)
-        for pattern in ("mariadbd-safe", "mysqld_safe", "mariadbd", "mysqld"):
-            run_cmd(f"pkill -KILL -f '{pattern}'")
-
-        if is_process_running("mariadbd") or is_process_running("mysqld"):
-            print("\033[1;33m [!] Warning: MariaDB still running after shutdown.\033[0m")
-        else:
-            print("\033[1;32m [✓] MariaDB stopped cleanly (no supervisors left). \033[0m")
-
+        # Leave MariaDB running — later steps (phpMyAdmin storage) need it.
         return True
     except Exception as e:
         print(f"\033[1;31m [!] MariaDB init error: {e}\033[0m")
@@ -537,7 +548,6 @@ def setup_php_fpm():
     try:
         PHP_FPM_DIR.mkdir(parents=True, exist_ok=True)
         www_conf = PHP_FPM_DIR / "www.conf"
-
         conf_content = """\
 [www]
 listen = 127.0.0.1:9000
@@ -615,7 +625,7 @@ IP.2 = ::1
 
 
 # ---------------------------------------------------------------------------
-# Nginx (FUSE-safe)
+# Nginx (rate-limit removed on /phpmyadmin)
 # ---------------------------------------------------------------------------
 def setup_nginx():
     try:
@@ -623,9 +633,11 @@ def setup_nginx():
         cert_path = SSL_DIR / "server.crt"
         key_path = SSL_DIR / "server.key"
 
+        # phpMyAdmin loads many assets + POSTs; any aggressive rate-limit
+        # triggers nginx 503 "rejected". We removed it entirely — Cloudflare
+        # (when used via tunnel) already provides edge protection.
         common_locations = f"""\
         location ~ ^/phpmyadmin/.*\\.php$ {{
-            limit_req zone=pma_zone burst=5 nodelay;
             try_files $uri =404;
             include fastcgi_params;
             fastcgi_pass php_fpm;
@@ -682,8 +694,6 @@ http {{
         application/xml+rss application/x-font-ttf font/opentype
         image/svg+xml;
 
-    limit_req_zone $binary_remote_addr zone=pma_zone:10m rate=10r/m;
-
     upstream php_fpm {{
         server 127.0.0.1:9000;
     }}
@@ -693,6 +703,8 @@ http {{
         server_name localhost;
         root {HTDOCS_DIR};
         index index.php index.html index.htm;
+
+        client_max_body_size 512M;
 
         add_header X-Frame-Options "SAMEORIGIN" always;
         add_header X-Content-Type-Options "nosniff" always;
@@ -714,6 +726,8 @@ http {{
         root {HTDOCS_DIR};
         index index.php index.html index.htm;
 
+        client_max_body_size 512M;
+
         add_header Strict-Transport-Security "max-age=31536000" always;
         add_header X-Frame-Options "SAMEORIGIN" always;
         add_header X-Content-Type-Options "nosniff" always;
@@ -726,7 +740,7 @@ http {{
         conf_path.write_text(nginx_config)
 
         (PREFIX / "var/log").mkdir(parents=True, exist_ok=True)
-        print("\033[1;32m [✓] Nginx configured (FUSE-safe, explicit /dir/ handling). \033[0m")
+        print("\033[1;32m [✓] Nginx configured (no rate-limit on phpMyAdmin). \033[0m")
         return True
     except Exception as e:
         print(f"\033[1;31m [!] Nginx config error: {e}\033[0m")
@@ -824,20 +838,6 @@ session.gc_maxlifetime = 1440
     suffix = "..." if len(loaded_sorted) > 15 else ""
     print(f"\033[1;32m [✓] PHP loaded {len(loaded_sorted)} extensions: {preview}{suffix} \033[0m")
 
-    missing_pkgs = []
-    for ext, pkg in sorted(PHP_EXT_PACKAGES.items()):
-        if ext in loaded_before:
-            continue
-        if ext in available_so:
-            continue
-        missing_pkgs.append(pkg)
-
-    if missing_pkgs:
-        print(f"\033[1;33m [!] Optional packages not installed: {', '.join(missing_pkgs)} \033[0m")
-        print(f"\033[1;33m     To install: pkg install {' '.join(missing_pkgs)} \033[0m")
-    else:
-        print("\033[1;32m [✓] All available PHP extension packages are installed. \033[0m")
-
     return True
 
 
@@ -850,7 +850,6 @@ def setup_htdocs():
         (HTDOCS_DIR / "index.php").write_text(
             "<?php echo '<h1>Nginx + PHP-FPM Server is Running!</h1>'; ?>"
         )
-
         info_dir = HTDOCS_DIR / "phpinfo"
         info_dir.mkdir(exist_ok=True)
         (info_dir / "index.php").write_text("<?php phpinfo(); ?>")
@@ -860,7 +859,6 @@ def setup_htdocs():
             print(f"\033[1;32m [✓] htdocs permissions normalized ({changed} entries). \033[0m")
         else:
             print("\033[1;32m [✓] htdocs permissions already correct. \033[0m")
-
         return True
     except Exception as e:
         print(f"\033[1;31m [!] htdocs error: {e}\033[0m")
@@ -868,7 +866,91 @@ def setup_htdocs():
 
 
 # ---------------------------------------------------------------------------
-# phpMyAdmin
+# phpMyAdmin config storage setup
+# ---------------------------------------------------------------------------
+PMA_STORAGE_BLOCK = """\
+$cfg['Servers'][$i]['pmadb'] = 'phpmyadmin';
+$cfg['Servers'][$i]['bookmarktable'] = 'pma__bookmark';
+$cfg['Servers'][$i]['relation'] = 'pma__relation';
+$cfg['Servers'][$i]['table_info'] = 'pma__table_info';
+$cfg['Servers'][$i]['table_coords'] = 'pma__table_coords';
+$cfg['Servers'][$i]['pdf_pages'] = 'pma__pdf_pages';
+$cfg['Servers'][$i]['column_info'] = 'pma__column_info';
+$cfg['Servers'][$i]['history'] = 'pma__history';
+$cfg['Servers'][$i]['table_uiprefs'] = 'pma__table_uiprefs';
+$cfg['Servers'][$i]['tracking'] = 'pma__tracking';
+$cfg['Servers'][$i]['userconfig'] = 'pma__userconfig';
+$cfg['Servers'][$i]['recent'] = 'pma__recent';
+$cfg['Servers'][$i]['favorite'] = 'pma__favorite';
+$cfg['Servers'][$i]['users'] = 'pma__users';
+$cfg['Servers'][$i]['usergroups'] = 'pma__usergroups';
+$cfg['Servers'][$i]['navigationhiding'] = 'pma__navigationhiding';
+$cfg['Servers'][$i]['savedsearches'] = 'pma__savedsearches';
+$cfg['Servers'][$i]['central_columns'] = 'pma__central_columns';
+$cfg['Servers'][$i]['designer_settings'] = 'pma__designer_settings';
+$cfg['Servers'][$i]['export_templates'] = 'pma__export_templates';
+"""
+
+
+def setup_phpmyadmin_storage(pma_dir: Path) -> bool:
+    """Create the 'phpmyadmin' DB and import its config-storage tables."""
+    sock = PREFIX / "var/run/mysqld/mysqld.sock"
+    sql_create_tables = pma_dir / "sql" / "create_tables.sql"
+
+    if not sql_create_tables.exists():
+        print(f"\033[1;33m [!] Missing {sql_create_tables} — skipping storage setup. \033[0m")
+        return False
+
+    if not sock.exists():
+        print("\033[1;33m [!] MariaDB not running — skipping storage setup. \033[0m")
+        return False
+
+    # Create the DB and import tables
+    run_cmd(f"mysql --socket='{sock}' -e "
+            f"\"CREATE DATABASE IF NOT EXISTS phpmyadmin "
+            f"DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;\"")
+
+    r = subprocess.run(
+        f"mysql --socket='{sock}' phpmyadmin < '{sql_create_tables}'",
+        shell=True, capture_output=True, text=True
+    )
+    if r.returncode != 0:
+        print(f"\033[1;33m [!] Import warning: {r.stderr.strip()[:120]} \033[0m")
+
+    # Verify tables exist
+    r = subprocess.run(
+        f"mysql --socket='{sock}' -N -B -e "
+        f"\"SHOW TABLES FROM phpmyadmin LIKE 'pma\\\\_%';\"",
+        shell=True, capture_output=True, text=True
+    )
+    tables = [ln for ln in r.stdout.splitlines() if ln.strip()]
+    if tables:
+        print(f"\033[1;32m [✓] phpMyAdmin storage DB ready ({len(tables)} tables). \033[0m")
+        return True
+    print("\033[1;33m [!] phpMyAdmin storage DB has no tables. \033[0m")
+    return False
+
+
+def patch_phpmyadmin_config(config_file: Path):
+    """Add the pmadb block to config.inc.php if not already present."""
+    if not config_file.exists():
+        return
+    try:
+        content = config_file.read_text()
+    except Exception:
+        return
+    if "['pmadb']" in content:
+        # Already configured
+        return
+    content += "\n" + PMA_STORAGE_BLOCK
+    try:
+        config_file.write_text(content)
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# phpMyAdmin install
 # ---------------------------------------------------------------------------
 def install_phpmyadmin():
     pma_dir = HTDOCS_DIR / "phpmyadmin"
@@ -911,7 +993,6 @@ def install_phpmyadmin():
                 f"$cfg['blowfish_secret'] = '{secret}';",
                 content,
             )
-            # If DB has no password, allow no-password login (dev mode).
             allow_nopass = "true" if not DB_ROOT_PASSWORD else "false"
             content = re.sub(
                 r"\$cfg\['Servers'\]\[\$i\]\['AllowNoPassword'\]\s*=\s*(true|false);",
@@ -931,10 +1012,19 @@ def install_phpmyadmin():
             pma_tmp.mkdir(exist_ok=True)
             content += f"\n$cfg['TempDir'] = '{pma_tmp}';\n"
 
+            # Add storage block
+            content += "\n" + PMA_STORAGE_BLOCK
+
             config_file.write_text(content)
 
         pma_tmp = pma_dir / "tmp"
         pma_tmp.mkdir(exist_ok=True)
+
+        # Ensure storage block on updates too
+        patch_phpmyadmin_config(config_file)
+
+        # Set up storage DB (MariaDB should be running from setup_mariadb)
+        storage_ok = setup_phpmyadmin_storage(pma_dir)
 
         enforce_htdocs_permissions()
 
@@ -942,6 +1032,8 @@ def install_phpmyadmin():
             print("\033[1;32m [✓] phpMyAdmin updated successfully. \033[0m")
         else:
             print("\033[1;32m [✓] phpMyAdmin installed. \033[0m")
+        if storage_ok:
+            print("\033[1;32m [✓] phpMyAdmin configuration storage active. \033[0m")
         return True
     except Exception as e:
         print(f"\033[1;31m [!] phpMyAdmin error: {e}\033[0m")
@@ -997,6 +1089,16 @@ has_internet() {{
     return 1
 }}
 
+open_browser() {{
+    if command -v termux-open-url &> /dev/null; then
+        termux-open-url "http://localhost:8080" > /dev/null 2>&1 &
+    elif command -v termux-open &> /dev/null; then
+        termux-open "http://localhost:8080" > /dev/null 2>&1 &
+    elif command -v xdg-open &> /dev/null; then
+        xdg-open "http://localhost:8080" > /dev/null 2>&1 &
+    fi
+}}
+
 sync_php_extensions() {{
     local ext_dir
     ext_dir=$(php -n -r 'echo ini_get("extension_dir");' 2>/dev/null | tail -n1)
@@ -1031,6 +1133,26 @@ check_webroot() {{
         find "$HTDOCS_DIR" -type f -exec chmod 644 {{}} \; 2>/dev/null
     fi
     return 0
+}}
+
+ensure_pma_storage() {{
+    # Lazy setup: if phpmyadmin config storage DB is missing, create it now.
+    [ -S "$MARIADB_SOCKET" ] || return 0
+    local count
+    count=$(mysql --socket="$MARIADB_SOCKET" -N -B -e \
+        "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='phpmyadmin' AND table_name LIKE 'pma\\\\_%';" \
+        2>/dev/null)
+    [ -z "$count" ] && return 0
+    [ "$count" -gt 0 ] 2>/dev/null && return 0
+
+    local pma_sql="$HTDOCS_DIR/phpmyadmin/sql/create_tables.sql"
+    [ -f "$pma_sql" ] || return 0
+
+    echo -e "\033[1;34m[*] Setting up phpMyAdmin configuration storage...\033[0m"
+    mysql --socket="$MARIADB_SOCKET" -e \
+        "CREATE DATABASE IF NOT EXISTS phpmyadmin DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" 2>/dev/null
+    mysql --socket="$MARIADB_SOCKET" phpmyadmin < "$pma_sql" 2>/dev/null
+    echo -e "\033[1;32m[OK] phpMyAdmin storage ready.\033[0m"
 }}
 
 show_banner_and_status() {{
@@ -1118,6 +1240,8 @@ start_services() {{
         done
     fi
 
+    ensure_pma_storage
+
     echo -e "\033[1;34m[+] Starting Redis...\033[0m"
     mkdir -p "$PREFIX/var/lib/redis" "$PREFIX/var/log"
     if ! pgrep -f redis-server > /dev/null; then
@@ -1142,6 +1266,10 @@ start_services() {{
 
     sleep 1.5
     echo -e "\033[1;32m[OK] Services started successfully.\033[0m"
+
+    echo -e "\033[1;33m[*] Opening http://localhost:8080 in browser...\033[0m"
+    open_browser
+    sleep 1
 }}
 
 stop_services() {{
@@ -1363,7 +1491,6 @@ install_nextcloud() {{
     NC_DB_USER="ncuser"
 
     if pgrep -f "mariadb|mysqld" > /dev/null && [ -S "$MARIADB_SOCKET" ]; then
-        echo -e "\033[1;34m[*] Creating dedicated MariaDB user + database...\033[0m"
         mysql --socket="$MARIADB_SOCKET" <<SQL 2>/dev/null
 CREATE DATABASE IF NOT EXISTS nextcloud DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE USER IF NOT EXISTS '$NC_DB_USER'@'127.0.0.1' IDENTIFIED BY '$NC_DB_PASS';
@@ -1550,7 +1677,6 @@ uninstall_server() {{
     esac
 }}
 
-# --- Subcommand mode (non-interactive) ---
 if [ -n "$1" ]; then
     case "$1" in
         start) start_services ;;
@@ -1568,7 +1694,6 @@ if [ -n "$1" ]; then
     exit 0
 fi
 
-# --- Interactive mode ---
 if [ -z "$MYSERVER_SKIP_AUTOUPDATE" ]; then
     echo -e "\033[1;36m[*] Checking for updates...\033[0m"
     sleep 0.6
@@ -1585,7 +1710,6 @@ while true; do
     fi
 
     if [ "$SERVER_RUNNING" -eq 1 ]; then
-        # ====== RUNNING MENU ======
         echo -e "\033[1;33mSelect an option:\033[0m"
         echo -e "\033[1;33m 1) stop             (Stop all services)\033[0m"
         if is_tunnel_running; then
@@ -1626,7 +1750,6 @@ while true; do
             *) echo -e "\033[1;31mInvalid choice!\033[0m"; sleep 1 ;;
         esac
     else
-        # ====== STOPPED MENU ======
         echo -e "\033[1;33mSelect an option:\033[0m"
         echo -e "\033[1;33m 1) start            (Start all services)\033[0m"
         echo -e "\033[1;33m 2) quickstart       (Install WP / Laravel / Nextcloud)\033[0m"
@@ -1705,7 +1828,7 @@ def main():
     try:
         print(f"\033[1;33m[+] Deploying Advanced Nginx + PHP-FPM Server Stack v{CURRENT_VERSION}...\033[0m")
 
-        # --- Resolve web root (with arrow-key chooser) ---
+        # --- Resolve web root ---
         saved_path = None
         if HTDOCS_PATH_FILE.exists():
             try:
@@ -1735,7 +1858,7 @@ def main():
             print("\033[1;33m [i] MariaDB root will have NO password. \033[0m")
         print()
 
-        # --- Pre-flight: clean legacy extension= lines ---
+        # --- Pre-flight php.ini cleanup ---
         ini_path = get_php_ini_path()
         if ini_path.exists():
             removed = clean_php_ini_legacy(ini_path)
@@ -1785,10 +1908,13 @@ def main():
         else:
             print("\033[1;32m [✓] Web root is readable by all users. \033[0m")
 
+        # Final: stop MariaDB cleanly (it was kept running for pma storage setup)
+        print("\033[1;34m[+] Stopping MariaDB (post-install)...\033[0m")
+        stop_mariadb_cleanly()
         if is_process_running("mariadbd") or is_process_running("mysqld"):
-            print("\033[1;33m [!] Notice: MariaDB left running after install. \033[0m")
+            print("\033[1;33m [!] MariaDB still running after shutdown. \033[0m")
         else:
-            print("\033[1;32m [✓] MariaDB is stopped (ready for 'myserver start'). \033[0m")
+            print("\033[1;32m [✓] MariaDB stopped cleanly. \033[0m")
 
         print("\n\033[1;32m[✓] Server Stack Deployed Successfully!\033[0m")
         print(f"\033[1;36mWeb Root: {HTDOCS_DIR}\033[0m")
