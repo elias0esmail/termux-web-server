@@ -14,10 +14,11 @@ from pathlib import Path
 # Current Version & Release Notes
 CURRENT_VERSION = "2.18.1"
 CHANGELOG = [
-    "Fix: Clean arrow-key menu (no repeated prompt printing, no full paths)",
-    "Fix: phpMyAdmin 503 — removed aggressive rate limit on /phpmyadmin",
-    "New: phpMyAdmin config storage auto-setup (creates 'phpmyadmin' DB + tables)",
-    "New: Auto-open http://localhost:8080 on 'myserver start'",
+    "Fix: Bullet-proof arrow-key menu (save/restore cursor, no line counting)",
+    "Fix: Menu selection highlighted in cyan; short labels only (no full paths)",
+    "Fix: (carried) phpMyAdmin 503 — no rate limit on /phpmyadmin",
+    "New: (carried) phpMyAdmin config storage auto-setup",
+    "New: (carried) Auto-open http://localhost:8080 on 'myserver start'",
     "Fix: (carried) Nginx FUSE-safe directory handling",
     "Security: (carried) PHP path traversal fix + AllowNoPassword logic",
     "Fix: (carried) MariaDB stopped cleanly after installation",
@@ -79,16 +80,21 @@ def is_process_running(pattern: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Interactive arrow-key menu (clean rendering)
+# Interactive arrow-key menu (bullet-proof rendering)
 # ---------------------------------------------------------------------------
 def choose_option(title: str, options: list, default: int = 0) -> int:
     """
-    Clean arrow-key menu:
-      - prints title and options ONCE
-      - on ↑/↓ only the option lines are redrawn (using ANSI clear-line + move-up)
-      - falls back to numeric input if stdin isn't a TTY
+    Bullet-proof arrow-key menu using save/restore cursor + clear-below.
+
+    Uses ANSI:
+      \\033[s   -> save cursor position
+      \\033[u   -> restore cursor position
+      \\033[J   -> clear from cursor to end of screen
+    This is immune to line wrapping and other processes writing to the
+    same terminal, unlike line-counting approaches.
     """
     if not sys.stdin.isatty():
+        # Non-interactive fallback
         print(f"\033[1;36m{title}\033[0m")
         for i, opt in enumerate(options, 1):
             print(f"  {i}) {opt}")
@@ -107,34 +113,27 @@ def choose_option(title: str, options: list, default: int = 0) -> int:
     N = len(options)
     idx = default
 
-    # Print title once
+    # Print title + save cursor at the position where options will be drawn
     sys.stdout.write(f"\033[1;36m{title}\033[0m\n")
-    # Reserve N blank lines for options
-    for _ in range(N):
-        sys.stdout.write("\n")
-    # Print the hint line
-    sys.stdout.write("\033[1;33m  (Use ↑/↓ to move, Enter to select)\033[0m\n")
+    sys.stdout.write("\033[s")          # <-- save cursor here
     sys.stdout.flush()
 
-    # Cursor is now one line BELOW the hint.
-    # To reach the first option line we must move up (N + 1) lines.
-    def redraw():
-        sys.stdout.write(f"\033[{N + 1}A")  # up to first option line
+    def render():
+        # Restore to saved row, clear everything below, redraw
+        sys.stdout.write("\033[u")      # restore cursor
+        sys.stdout.write("\033[J")      # clear to end of screen
         for i, opt in enumerate(options):
-            sys.stdout.write("\033[2K")     # clear line
             if i == idx:
-                sys.stdout.write(f"  \033[1;32m❯ {opt}\033[0m\n")
+                # Cyan highlight
+                sys.stdout.write(f"  \033[1;36m❯ {opt}\033[0m\n")
             else:
                 sys.stdout.write(f"    {opt}\n")
-        # After loop, cursor sits on the hint line (1 line below last option).
-        # Move back up to the first option for the next redraw.
-        sys.stdout.write(f"\033[{N}A")
+        sys.stdout.write("\033[1;33m  ↑/↓ move · Enter select\033[0m\n")
         sys.stdout.flush()
 
-    sys.stdout.write("\033[?25l")  # hide cursor
+    sys.stdout.write("\033[?25l")       # hide cursor
     sys.stdout.flush()
-
-    redraw()
+    render()
 
     try:
         tty.setcbreak(fd)
@@ -144,35 +143,36 @@ def choose_option(title: str, options: list, default: int = 0) -> int:
                 ch2 = sys.stdin.read(1)
                 if ch2 == '[':
                     ch3 = sys.stdin.read(1)
-                    if ch3 == 'A':       # Up
+                    if ch3 == 'A':          # Up arrow
                         idx = (idx - 1) % N
-                        redraw()
-                    elif ch3 == 'B':     # Down
+                        render()
+                    elif ch3 == 'B':        # Down arrow
                         idx = (idx + 1) % N
-                        redraw()
-            elif ch in ('\r', '\n'):
+                        render()
+            elif ch in ('\r', '\n'):        # Enter
                 break
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-        sys.stdout.write("\033[?25h")  # show cursor
-        # Move cursor below the hint line and leave a clean newline.
-        sys.stdout.write(f"\033[{N + 1}B")
+        # Move cursor below the menu and show it again
+        sys.stdout.write("\033[u")                  # restore to start
+        sys.stdout.write(f"\033[{N + 1}B")          # move down past menu + hint
         sys.stdout.write("\n")
+        sys.stdout.write("\033[?25h")               # show cursor
         sys.stdout.flush()
 
     return idx
 
 
 def ask_web_root_location() -> Path:
-    """Prompt user to choose the web root directory (names only, no paths)."""
+    """Prompt user to choose the web root directory (short labels only)."""
     home_path = HOME / "htdocs"
     storage_path = HOME / "storage/shared/htdocs"
 
     idx = choose_option(
         "Where should the web root (htdocs) be created?",
         [
-            "Termux home     (private, faster)",
-            "Phone storage   (visible in Files app)",
+            "Termux home",
+            "Phone storage",
         ],
         default=0,
     )
@@ -405,7 +405,6 @@ def print_htdocs_diagnostic():
 # MariaDB lifecycle helpers
 # ---------------------------------------------------------------------------
 def start_mariadb_background():
-    """Start mariadbd-safe in the background (used during install)."""
     data_dir = PREFIX / "var/lib/mysql"
     run_dir = PREFIX / "var/run/mysqld"
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -625,7 +624,7 @@ IP.2 = ::1
 
 
 # ---------------------------------------------------------------------------
-# Nginx (rate-limit removed on /phpmyadmin)
+# Nginx (no rate limit on phpMyAdmin)
 # ---------------------------------------------------------------------------
 def setup_nginx():
     try:
@@ -633,9 +632,6 @@ def setup_nginx():
         cert_path = SSL_DIR / "server.crt"
         key_path = SSL_DIR / "server.key"
 
-        # phpMyAdmin loads many assets + POSTs; any aggressive rate-limit
-        # triggers nginx 503 "rejected". We removed it entirely — Cloudflare
-        # (when used via tunnel) already provides edge protection.
         common_locations = f"""\
         location ~ ^/phpmyadmin/.*\\.php$ {{
             try_files $uri =404;
@@ -905,7 +901,6 @@ def setup_phpmyadmin_storage(pma_dir: Path) -> bool:
         print("\033[1;33m [!] MariaDB not running — skipping storage setup. \033[0m")
         return False
 
-    # Create the DB and import tables
     run_cmd(f"mysql --socket='{sock}' -e "
             f"\"CREATE DATABASE IF NOT EXISTS phpmyadmin "
             f"DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;\"")
@@ -917,7 +912,6 @@ def setup_phpmyadmin_storage(pma_dir: Path) -> bool:
     if r.returncode != 0:
         print(f"\033[1;33m [!] Import warning: {r.stderr.strip()[:120]} \033[0m")
 
-    # Verify tables exist
     r = subprocess.run(
         f"mysql --socket='{sock}' -N -B -e "
         f"\"SHOW TABLES FROM phpmyadmin LIKE 'pma\\\\_%';\"",
@@ -932,7 +926,6 @@ def setup_phpmyadmin_storage(pma_dir: Path) -> bool:
 
 
 def patch_phpmyadmin_config(config_file: Path):
-    """Add the pmadb block to config.inc.php if not already present."""
     if not config_file.exists():
         return
     try:
@@ -940,7 +933,6 @@ def patch_phpmyadmin_config(config_file: Path):
     except Exception:
         return
     if "['pmadb']" in content:
-        # Already configured
         return
     content += "\n" + PMA_STORAGE_BLOCK
     try:
@@ -1011,8 +1003,6 @@ def install_phpmyadmin():
             pma_tmp = pma_dir / "tmp"
             pma_tmp.mkdir(exist_ok=True)
             content += f"\n$cfg['TempDir'] = '{pma_tmp}';\n"
-
-            # Add storage block
             content += "\n" + PMA_STORAGE_BLOCK
 
             config_file.write_text(content)
@@ -1020,10 +1010,7 @@ def install_phpmyadmin():
         pma_tmp = pma_dir / "tmp"
         pma_tmp.mkdir(exist_ok=True)
 
-        # Ensure storage block on updates too
         patch_phpmyadmin_config(config_file)
-
-        # Set up storage DB (MariaDB should be running from setup_mariadb)
         storage_ok = setup_phpmyadmin_storage(pma_dir)
 
         enforce_htdocs_permissions()
@@ -1136,7 +1123,6 @@ check_webroot() {{
 }}
 
 ensure_pma_storage() {{
-    # Lazy setup: if phpmyadmin config storage DB is missing, create it now.
     [ -S "$MARIADB_SOCKET" ] || return 0
     local count
     count=$(mysql --socket="$MARIADB_SOCKET" -N -B -e \
@@ -1908,7 +1894,7 @@ def main():
         else:
             print("\033[1;32m [✓] Web root is readable by all users. \033[0m")
 
-        # Final: stop MariaDB cleanly (it was kept running for pma storage setup)
+        # Final: stop MariaDB cleanly
         print("\033[1;34m[+] Stopping MariaDB (post-install)...\033[0m")
         stop_mariadb_cleanly()
         if is_process_running("mariadbd") or is_process_running("mysqld"):
