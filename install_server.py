@@ -10,14 +10,15 @@ import secrets
 import getpass
 from pathlib import Path
 
-CURRENT_VERSION = "2.19.2"
+CURRENT_VERSION = "2.19.3"
 CHANGELOG = [
-    "Fix: fzf menu rendering — ASCII pointer, no separator, header-first",
-    "Fix: Colors reset before invoking fzf (no more stray escape sequences)",
+    "Fix: MariaDB root auth — use normal auth (no more ERROR 1698)",
+    "New: Auto-repair broken unix_socket root auth on existing installs",
+    "Fix: setup_mariadb now reports real errors instead of silent failures",
+    "Fix: phpMyAdmin storage — explicit -u root on every mysql call",
+    "Improvement: Reinstall menu label shortened to 'keeps DBs+htdocs'",
+    "Fix: (carried) fzf clean menu rendering",
     "Fix: (carried) 'command not found' during uninstall",
-    "Improvement: (carried) Full wipe on uninstall, preserve on reinstall",
-    "Fix: (carried) mariadb client (no deprecation warnings)",
-    "Fix: (carried) phpMyAdmin storage import uses --force",
 ]
 
 PREFIX = Path(os.environ.get('PREFIX', '/data/data/com.termux/files/usr'))
@@ -98,20 +99,12 @@ def ensure_fzf() -> bool:
 
 
 def choose_option(title: str, options: list, default: int = 0) -> int:
-    """
-    Robust arrow-key menu using fzf with minimal chrome.
-
-    - ASCII pointer (>) for maximum font compatibility in Termux
-    - No separator, no scrollbar, no info line
-    - Header shown first (above the list)
-    """
     if not options:
         return 0
     if len(options) == 1:
         return 0
 
     if not ensure_fzf():
-        # Fallback: numeric input
         print(f"\033[1;36m{title}\033[0m")
         for i, opt in enumerate(options, 1):
             print(f"  {i}) {opt}")
@@ -123,7 +116,6 @@ def choose_option(title: str, options: list, default: int = 0) -> int:
         except Exception:
             return default
 
-    # Reset colors and move to a clean line before handing over to fzf
     sys.stdout.write("\033[0m\n")
     sys.stdout.flush()
 
@@ -436,6 +428,83 @@ def stop_mariadb_cleanly():
         run_cmd(f"pkill -KILL -f '{pattern}'")
 
 
+def repair_root_if_unix_socket():
+    """
+    Detect a MariaDB install where root uses unix_socket auth (which fails
+    on Termux because the OS user is not 'root'), and repair it using
+    --skip-grant-tables mode.
+    """
+    if not MARIADB_SOCKET.exists():
+        return
+    cli = mysql_client()
+
+    # Try a normal connection
+    r = subprocess.run(
+        f"{cli} -u root --socket='{MARIADB_SOCKET}' -e 'SELECT 1;'",
+        shell=True, capture_output=True, text=True, timeout=10)
+    if r.returncode == 0:
+        return  # Already fine
+
+    err = (r.stderr or "").lower()
+    if "1698" not in err and "unix_socket" not in err and "access denied" not in err:
+        return  # Not a unix_socket issue — leave it alone
+
+    print("\033[1;33m [*] Detected broken root auth — repairing via skip-grant-tables...\033[0m")
+
+    # 1. Stop MariaDB
+    stop_mariadb_cleanly()
+    time.sleep(2)
+
+    # 2. Start with --skip-grant-tables
+    if command_exists("mariadbd-safe"):
+        cmd = (f"mariadbd-safe --skip-grant-tables --skip-networking "
+               f"--datadir='{MYSQL_DATA_DIR}' --socket='{MARIADB_SOCKET}'")
+    else:
+        cmd = (f"mariadbd --skip-grant-tables --skip-networking "
+               f"--datadir='{MYSQL_DATA_DIR}' --socket='{MARIADB_SOCKET}'")
+    subprocess.Popen(cmd, shell=True,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    ok = False
+    for _ in range(15):
+        if MARIADB_SOCKET.exists():
+            ok = True
+            break
+        time.sleep(1)
+    if not ok:
+        print("\033[1;31m [!] Repair failed: MariaDB did not start.\033[0m")
+        return
+
+    time.sleep(2)
+
+    # 3. Fix root auth using multiple SQL strategies (MariaDB version-safe)
+    fix_sql = (
+        "UPDATE mysql.user SET plugin='mysql_native_password' "
+        "WHERE User='root' AND Host='localhost';"
+        "UPDATE mysql.user SET Password='' "
+        "WHERE User='root' AND Host='localhost';"
+        "UPDATE mysql.user SET authentication_string='' "
+        "WHERE User='root' AND Host='localhost';"
+        "FLUSH PRIVILEGES;"
+    )
+    subprocess.run(
+        f"{cli} -u root --socket='{MARIADB_SOCKET}' -e \"{fix_sql}\"",
+        shell=True, capture_output=True, text=True)
+
+    # 4. Stop and restart normally
+    stop_mariadb_cleanly()
+    time.sleep(2)
+
+    if start_mariadb_background():
+        r = subprocess.run(
+            f"{cli} -u root --socket='{MARIADB_SOCKET}' -e 'SELECT 1;'",
+            shell=True, capture_output=True, text=True, timeout=10)
+        if r.returncode == 0:
+            print("\033[1;32m [✓] Root authentication repaired successfully. \033[0m")
+        else:
+            print("\033[1;33m [!] Repair attempted but root still not accessible.\033[0m")
+
+
 # ===========================================================================
 # Setup: MariaDB
 # ===========================================================================
@@ -453,8 +522,12 @@ def setup_mariadb():
         fresh_install = not (MYSQL_DATA_DIR / "mysql").exists()
 
         if fresh_install:
-            run_cmd(f"mariadb-install-db --datadir='{MYSQL_DATA_DIR}'")
-            print("\033[1;32m [✓] MariaDB database initialized. \033[0m")
+            # KEY FIX: use normal auth (mysql_native_password) instead of
+            # unix_socket. Termux OS user is not "root", so unix_socket
+            # would reject every connection with ERROR 1698.
+            run_cmd(f"mariadb-install-db --auth-root-authentication-method=normal "
+                    f"--datadir='{MYSQL_DATA_DIR}'")
+            print("\033[1;32m [✓] MariaDB database initialized (normal auth). \033[0m")
         else:
             print("\033[1;36m [i] Existing MariaDB data detected — preserving databases. \033[0m")
 
@@ -462,8 +535,12 @@ def setup_mariadb():
             print("\033[1;31m [!] Failed to start MariaDB. \033[0m")
             return False
 
+        # If existing install had unix_socket auth, try to repair it now.
+        repair_root_if_unix_socket()
+
         cli = mysql_client()
 
+        # Hardening (capture errors so we see the real ones)
         if MARIADB_SOCKET.exists():
             sec_sql = (
                 "DELETE FROM mysql.user WHERE User='';"
@@ -473,8 +550,15 @@ def setup_mariadb():
                 "DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';"
                 "FLUSH PRIVILEGES;"
             )
-            run_cmd(f"{cli} -u root --socket='{MARIADB_SOCKET}' -e \"{sec_sql}\"")
-            print("\033[1;32m [✓] MariaDB Security Hardening applied. \033[0m")
+            r = subprocess.run(
+                f"{cli} -u root --socket='{MARIADB_SOCKET}' -e \"{sec_sql}\"",
+                shell=True, capture_output=True, text=True)
+            if r.returncode == 0:
+                print("\033[1;32m [✓] MariaDB Security Hardening applied. \033[0m")
+            else:
+                snippet = (r.stderr or "").strip().splitlines()
+                snippet = snippet[0][:200] if snippet else "unknown error"
+                print(f"\033[1;33m [!] Hardening note: {snippet} \033[0m")
 
         if REINSTALL_MODE:
             print("\033[1;36m [i] Reinstall mode — preserving root credentials. \033[0m")
@@ -490,17 +574,31 @@ def setup_mariadb():
                 f"ALTER USER 'root'@'localhost' IDENTIFIED BY '{escaped}';\n"
                 f"FLUSH PRIVILEGES;\n"
             )
-            run_cmd(f"{cli} --socket='{MARIADB_SOCKET}' < '{tmp_sql}'")
+            r = subprocess.run(
+                f"{cli} -u root --socket='{MARIADB_SOCKET}' < '{tmp_sql}'",
+                shell=True, capture_output=True, text=True)
             try:
                 tmp_sql.unlink()
             except Exception:
                 pass
-            write_my_cnf(DB_ROOT_PASSWORD, MARIADB_SOCKET)
-            print("\033[1;32m [✓] MariaDB root password set. \033[0m")
+            if r.returncode == 0:
+                write_my_cnf(DB_ROOT_PASSWORD, MARIADB_SOCKET)
+                print("\033[1;32m [✓] MariaDB root password set. \033[0m")
+            else:
+                snippet = (r.stderr or "").strip().splitlines()
+                snippet = snippet[0][:200] if snippet else "unknown error"
+                print(f"\033[1;33m [!] Password note: {snippet} \033[0m")
         else:
-            run_cmd(f"{cli} --socket='{MARIADB_SOCKET}' -e "
-                    f"\"ALTER USER 'root'@'localhost' IDENTIFIED BY ''; FLUSH PRIVILEGES;\"")
-            print("\033[1;36m [i] MariaDB root has no password. \033[0m")
+            r = subprocess.run(
+                f"{cli} -u root --socket='{MARIADB_SOCKET}' -e "
+                f"\"ALTER USER 'root'@'localhost' IDENTIFIED BY ''; FLUSH PRIVILEGES;\"",
+                shell=True, capture_output=True, text=True)
+            if r.returncode == 0:
+                print("\033[1;36m [i] MariaDB root has no password. \033[0m")
+            else:
+                snippet = (r.stderr or "").strip().splitlines()
+                snippet = snippet[0][:200] if snippet else "unknown error"
+                print(f"\033[1;33m [!] Note: {snippet} \033[0m")
 
         return True
     except Exception as e:
@@ -842,12 +940,21 @@ def setup_phpmyadmin_storage(pma_dir: Path) -> bool:
         return False
 
     cli = mysql_client()
-    run_cmd(f"{cli} --socket='{MARIADB_SOCKET}' -e "
-            f"\"CREATE DATABASE IF NOT EXISTS phpmyadmin "
-            f"DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;\"")
+
+    # Explicit -u root on every call
+    r = subprocess.run(
+        f"{cli} -u root --socket='{MARIADB_SOCKET}' -e "
+        f"\"CREATE DATABASE IF NOT EXISTS phpmyadmin "
+        f"DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;\"",
+        shell=True, capture_output=True, text=True)
+    if r.returncode != 0:
+        snippet = (r.stderr or "").strip().splitlines()
+        snippet = snippet[0][:200] if snippet else "unknown error"
+        print(f"\033[1;33m [!] CREATE DATABASE failed: {snippet} \033[0m")
+        return False
 
     r = subprocess.run(
-        f"{cli} --socket='{MARIADB_SOCKET}' --force phpmyadmin < '{sql_create_tables}'",
+        f"{cli} -u root --socket='{MARIADB_SOCKET}' --force phpmyadmin < '{sql_create_tables}'",
         shell=True, capture_output=True, text=True)
     if r.returncode != 0:
         snippet = (r.stderr or "").strip().splitlines()
@@ -855,7 +962,7 @@ def setup_phpmyadmin_storage(pma_dir: Path) -> bool:
         print(f"\033[1;33m [!] Import note: {snippet} \033[0m")
 
     r = subprocess.run(
-        f"{cli} --socket='{MARIADB_SOCKET}' -N -B -e "
+        f"{cli} -u root --socket='{MARIADB_SOCKET}' -N -B -e "
         f"\"SHOW TABLES FROM phpmyadmin LIKE 'pma\\\\_%';\"",
         shell=True, capture_output=True, text=True)
     tables = [ln for ln in r.stdout.splitlines() if ln.strip()]
@@ -1001,7 +1108,7 @@ open_browser() {{
 start_mariadb_background() {{
     mkdir -p "$MYSQL_DATA_DIR" "$MYSQL_RUN_DIR"
     [ -S "$MARIADB_SOCKET" ] && rm -f "$MARIADB_SOCKET"
-    [ ! -d "$MYSQL_DATA_DIR/mysql" ] && mariadb-install-db --datadir="$MYSQL_DATA_DIR" > /dev/null 2>&1
+    [ ! -d "$MYSQL_DATA_DIR/mysql" ] && mariadb-install-db --auth-root-authentication-method=normal --datadir="$MYSQL_DATA_DIR" > /dev/null 2>&1
     if command -v mariadbd-safe &> /dev/null; then
         mariadbd-safe --datadir="$MYSQL_DATA_DIR" --socket="$MARIADB_SOCKET" > /dev/null 2>&1 &
     else
@@ -1062,16 +1169,16 @@ check_webroot() {{
 ensure_pma_storage() {{
     [ -S "$MARIADB_SOCKET" ] || return 0
     local count
-    count=$("$MYSQL_CLI" --socket="$MARIADB_SOCKET" -N -B -e \
+    count=$("$MYSQL_CLI" -u root --socket="$MARIADB_SOCKET" -N -B -e \
         "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='phpmyadmin' AND table_name LIKE 'pma\\\\_%';" 2>/dev/null)
     [ -z "$count" ] && return 0
     [ "$count" -gt 0 ] 2>/dev/null && return 0
     local pma_sql="$HTDOCS_DIR/phpmyadmin/sql/create_tables.sql"
     [ -f "$pma_sql" ] || return 0
     echo -e "\033[1;34m[*] Setting up phpMyAdmin configuration storage...\033[0m"
-    "$MYSQL_CLI" --socket="$MARIADB_SOCKET" -e \
+    "$MYSQL_CLI" -u root --socket="$MARIADB_SOCKET" -e \
         "CREATE DATABASE IF NOT EXISTS phpmyadmin DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" 2>/dev/null
-    "$MYSQL_CLI" --socket="$MARIADB_SOCKET" --force phpmyadmin < "$pma_sql" 2>/dev/null
+    "$MYSQL_CLI" -u root --socket="$MARIADB_SOCKET" --force phpmyadmin < "$pma_sql" 2>/dev/null
     echo -e "\033[1;32m[OK] phpMyAdmin storage ready.\033[0m"
 }}
 
@@ -1233,7 +1340,7 @@ install_wordpress() {{
     tar -xf "$PREFIX/tmp/wordpress.tar.gz" -C "$HTDOCS_DIR"
     rm -f "$PREFIX/tmp/wordpress.tar.gz"
     if [ -S "$MARIADB_SOCKET" ]; then
-        "$MYSQL_CLI" --socket="$MARIADB_SOCKET" -e "CREATE DATABASE IF NOT EXISTS wordpress DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" 2>/dev/null
+        "$MYSQL_CLI" -u root --socket="$MARIADB_SOCKET" -e "CREATE DATABASE IF NOT EXISTS wordpress DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" 2>/dev/null
     fi
     chmod 755 "$HTDOCS_DIR" 2>/dev/null
     find "$HTDOCS_DIR" -type d -exec chmod 755 {{}} \; 2>/dev/null
@@ -1252,7 +1359,7 @@ install_laravel() {{
     composer create-project --prefer-dist laravel/laravel "$LARAVEL_DIR"
     DB_NAME=$(echo "$PROJECT_NAME" | tr '-' '_')
     if [ -S "$MARIADB_SOCKET" ]; then
-        "$MYSQL_CLI" --socket="$MARIADB_SOCKET" -e "CREATE DATABASE IF NOT EXISTS \`$DB_NAME\` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" 2>/dev/null
+        "$MYSQL_CLI" -u root --socket="$MARIADB_SOCKET" -e "CREATE DATABASE IF NOT EXISTS \`$DB_NAME\` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" 2>/dev/null
     fi
     chmod 755 "$HTDOCS_DIR" 2>/dev/null
     find "$HTDOCS_DIR" -type d -exec chmod 755 {{}} \; 2>/dev/null
@@ -1273,7 +1380,7 @@ install_nextcloud() {{
     NC_DB_PASS=$(head -c 18 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 20)
     NC_DB_USER="ncuser"
     if [ -S "$MARIADB_SOCKET" ]; then
-        "$MYSQL_CLI" --socket="$MARIADB_SOCKET" <<SQL 2>/dev/null
+        "$MYSQL_CLI" -u root --socket="$MARIADB_SOCKET" <<SQL 2>/dev/null
 CREATE DATABASE IF NOT EXISTS nextcloud DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE USER IF NOT EXISTS '$NC_DB_USER'@'127.0.0.1' IDENTIFIED BY '$NC_DB_PASS';
 CREATE USER IF NOT EXISTS '$NC_DB_USER'@'localhost' IDENTIFIED BY '$NC_DB_PASS';
@@ -1333,7 +1440,7 @@ PYEOF
             [yY]*)
                 echo -e "\033[1;33m[*] Stopping services...\033[0m"
                 stop_services
-                echo -e "\033[1;34m[*] Installing update (databases + htdocs preserved)...\033[0m"
+                echo -e "\033[1;34m[*] Installing update (DBs+htdocs preserved)...\033[0m"
                 MYSERVER_SKIP_AUTOUPDATE=1 MYSERVER_REINSTALL=1 python3 "$TMP_UPD"
                 rm -f "$TMP_UPD"
                 echo -e "\n\033[1;32m[OK] Updated to $REMOTE_VER!\033[0m"
@@ -1375,7 +1482,7 @@ reinstall_server() {{
                 return
             fi
             stop_services
-            echo -e "\033[1;34m[*] Reinstalling (databases + htdocs preserved)...\033[0m"
+            echo -e "\033[1;34m[*] Reinstalling (DBs+htdocs preserved)...\033[0m"
             MYSERVER_SKIP_AUTOUPDATE=1 MYSERVER_REINSTALL=1 python3 "$TMP_UPD"
             rm -f "$TMP_UPD"
             echo -e "\n\033[1;32m[OK] Reinstall completed!\033[0m"
@@ -1405,12 +1512,12 @@ uninstall_server() {{
 
             echo -e "\033[1;33m[*] Starting MariaDB to drop databases...\033[0m"
             if start_mariadb_background; then
-                DBS=$("$MYSQL_CLI" --socket="$MARIADB_SOCKET" -N -B -e \
+                DBS=$("$MYSQL_CLI" -u root --socket="$MARIADB_SOCKET" -N -B -e \
                     "SHOW DATABASES WHERE \`Database\` NOT IN ('mysql','information_schema','performance_schema','sys');" 2>/dev/null)
                 for db in $DBS; do
                     [ -z "$db" ] && continue
                     echo -e "  \033[1;31m✗\033[0m Dropping database: \033[1;33m$db\033[0m"
-                    "$MYSQL_CLI" --socket="$MARIADB_SOCKET" -e "DROP DATABASE IF EXISTS \`$db\`;" 2>/dev/null
+                    "$MYSQL_CLI" -u root --socket="$MARIADB_SOCKET" -e "DROP DATABASE IF EXISTS \`$db\`;" 2>/dev/null
                 done
                 echo -e "\033[1;32m[OK] All user databases dropped.\033[0m"
                 stop_mariadb_cleanly
@@ -1488,7 +1595,7 @@ while true; do
         echo -e "\033[1;33m 4) quickstart       (Install WP / Laravel / Nextcloud)\033[0m"
         echo -e "\033[1;33m 5) refresh status   (Re-check server status)\033[0m"
         echo -e "\033[1;33m 6) update           (Check and apply updates)\033[0m"
-        echo -e "\033[1;33m 7) reinstall        (To fix issues — keeps DBs + htdocs)\033[0m"
+        echo -e "\033[1;33m 7) reinstall        (To fix issues — keeps DBs+htdocs)\033[0m"
         echo -e "\033[1;33m 8) uninstall        (Remove server + DBs + htdocs)\033[0m"
         echo -e "\033[1;33m 9) exit             (Exit & Stop Server)\033[0m"
         echo ""
@@ -1511,7 +1618,7 @@ while true; do
         echo -e "\033[1;33m 2) quickstart       (Install WP / Laravel / Nextcloud)\033[0m"
         echo -e "\033[1;33m 3) refresh status   (Re-check server status)\033[0m"
         echo -e "\033[1;33m 4) update           (Check and apply updates)\033[0m"
-        echo -e "\033[1;33m 5) reinstall        (To fix issues — keeps DBs + htdocs)\033[0m"
+        echo -e "\033[1;33m 5) reinstall        (To fix issues — keeps DBs+htdocs)\033[0m"
         echo -e "\033[1;33m 6) uninstall        (Remove server + DBs + htdocs)\033[0m"
         echo -e "\033[1;33m 7) exit\033[0m"
         echo ""
