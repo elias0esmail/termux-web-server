@@ -11,17 +11,16 @@ import string
 from pathlib import Path
 
 # Current Version & Release Notes
-CURRENT_VERSION = "2.16.0"
+CURRENT_VERSION = "2.16.1"
 CHANGELOG = [
-    "Fix: Deterministic PHP extension detection (cache ext_dir + .so list once)",
-    "Fix: Use `php -n -r` to bypass conf.d interference during extension_dir lookup",
-    "Fix: No more contradictory 'Registered' then 'missing' reports",
-    "Improvement: Diagnostic block reconciling with pkg list-installed",
-    "Improvement: Show available .so files and installed php-* packages",
-    "Fix: (carried) Real Termux PHP 8.5 extension model",
+    "Fix: Access denied (403) — enforce htdocs permissions 755/644",
+    "Fix: Auto-fix htdocs permissions on every 'myserver start'",
+    "New: 'myserver fixperms' command for manual permission repair",
+    "New: Web root readability diagnostic at install & start",
+    "Improvement: imagick added to conf.d auto-registration",
+    "Fix: (carried) Deterministic PHP extension detection",
     "Security: (carried) PHP path traversal fix + phpMyAdmin AllowNoPassword OFF",
     "Fix: (carried) MariaDB stopped cleanly after installation",
-    "Fix: (carried) conf.d auto-generation with stale cleanup",
 ]
 
 # System and Environment Paths
@@ -40,26 +39,21 @@ REPO_DIR = Path(__file__).resolve().parent
 GITHUB_RAW_URL = "https://raw.githubusercontent.com/elias0esmail/termux-web-server/main"
 
 # ---------------------------------------------------------------------------
-# PHP extension inventory (verified against Termux PHP 8.5.1)
+# PHP extension inventory
 # ---------------------------------------------------------------------------
-
-# Extensions we EXPECT to be available after install.
-# Built-in ones are compiled INTO the main 'php' package.
 PHP_EXPECTED_EXTENSIONS = [
-    # Built-in:
+    # Built-in to main php package:
     "mysqli", "pdo_mysql", "mbstring", "openssl",
     "curl", "zip", "xml", "intl", "bcmath",
-    # External (need conf.d registration):
-    "gd", "sodium", "redis", "apcu",
+    # External (registered via conf.d):
+    "gd", "sodium", "redis", "apcu", "imagick",
 ]
 
-# Extensions bundled INSIDE the main php package (no .so lookup needed).
 PHP_BUILTIN_EXTENSIONS = {
     "mysqli", "pdo_mysql", "mbstring", "openssl",
     "curl", "zip", "xml", "intl", "bcmath",
 }
 
-# Termux packages that ACTUALLY EXIST and provide PHP extensions.
 PHP_EXT_PACKAGES = {
     "gd":      "php-gd",
     "sodium":  "php-sodium",
@@ -85,7 +79,6 @@ def is_process_running(pattern: str) -> bool:
 
 
 def get_php_ini_path() -> Path:
-    """Detect the actual php.ini path from the php binary."""
     try:
         result = subprocess.run(["php", "--ini"], capture_output=True, text=True)
         if result.returncode == 0:
@@ -110,10 +103,9 @@ def get_php_confd_dir() -> Path:
 
 
 # ---------------------------------------------------------------------------
-# PHP introspection helpers (source of truth = the php binary)
+# PHP introspection
 # ---------------------------------------------------------------------------
 def php_loaded_extensions() -> set:
-    """Return the set of extensions PHP reports as loaded (lowercase)."""
     try:
         r = subprocess.run(["php", "-m"], capture_output=True,
                            text=True, timeout=15)
@@ -129,15 +121,6 @@ def php_loaded_extensions() -> set:
 
 
 def php_extension_dir() -> Path:
-    """
-    Get PHP's extension_dir WITHOUT loading any ini/conf.d files.
-
-    Why `php -n`? Because once we write conf.d/gd.ini, a normal `php -r`
-    call would try to load gd.so and may print a warning to stdout,
-    contaminating the path we're trying to read. Using `-n` bypasses
-    ini + conf.d entirely and returns the compiled-in default path.
-    """
-    # Method 1: php -n -r (fast, isolated)
     try:
         r = subprocess.run(
             ["php", "-n", "-r", 'echo ini_get("extension_dir");'],
@@ -151,8 +134,6 @@ def php_extension_dir() -> Path:
                     return p
     except Exception:
         pass
-
-    # Method 2: parse `php -i` output
     try:
         r = subprocess.run(["php", "-i"], capture_output=True,
                            text=True, timeout=10)
@@ -165,12 +146,10 @@ def php_extension_dir() -> Path:
                         return Path(val)
     except Exception:
         pass
-
     return PHP_LIB_DIR
 
 
 def scan_available_so(ext_dir: Path) -> set:
-    """Return the set of extension names (.so stems) present in ext_dir."""
     found = set()
     try:
         if ext_dir.exists():
@@ -182,7 +161,6 @@ def scan_available_so(ext_dir: Path) -> set:
 
 
 def php_ext_so_exists(name: str, ext_dir: Path = None) -> bool:
-    """True if a physical .so exists in PHP's extension_dir."""
     if ext_dir is None:
         ext_dir = php_extension_dir()
     if not ext_dir.exists():
@@ -203,22 +181,15 @@ def php_ext_installed(name: str) -> bool:
 
 
 def clean_php_ini_legacy(ini_path: Path) -> int:
-    """
-    Remove legacy 'extension=...' lines from php.ini that cause PHP startup
-    warnings when the corresponding .so is not present.
-    """
     if not ini_path.exists():
         return 0
     try:
         content = ini_path.read_text()
     except Exception:
         return 0
-
     new_content, n = re.subn(
         r"^[ \t]*extension[ \t]*=[ \t]*[^\r\n]*[\r\n]?",
-        "",
-        content,
-        flags=re.MULTILINE,
+        "", content, flags=re.MULTILINE,
     )
     if n > 0:
         ini_path.write_text(new_content)
@@ -226,7 +197,6 @@ def clean_php_ini_legacy(ini_path: Path) -> int:
 
 
 def list_installed_php_packages() -> set:
-    """Return the set of php-* Termux packages currently installed."""
     pkgs = set()
     try:
         r = subprocess.run(
@@ -243,10 +213,128 @@ def list_installed_php_packages() -> set:
 
 
 # ---------------------------------------------------------------------------
+# Web root helpers (Access denied fix)
+# ---------------------------------------------------------------------------
+def enforce_htdocs_permissions() -> int:
+    """
+    Make sure nginx can read the web root:
+      - directories: 755 (r-x for everyone)
+      - files:       644 (r-- for everyone)
+    Returns the number of entries changed (0 if already fine).
+    """
+    if not HTDOCS_DIR.exists():
+        return 0
+    changed = 0
+
+    # Top directory
+    try:
+        cur = HTDOCS_DIR.stat().st_mode & 0o777
+        if cur != 0o755:
+            os.chmod(HTDOCS_DIR, 0o755)
+            changed += 1
+    except Exception:
+        pass
+
+    # Recursive
+    try:
+        for root, dirs, files in os.walk(HTDOCS_DIR):
+            for d in dirs:
+                p = os.path.join(root, d)
+                try:
+                    cur = os.stat(p).st_mode & 0o777
+                    if cur != 0o755:
+                        os.chmod(p, 0o755)
+                        changed += 1
+                except Exception:
+                    pass
+            for f in files:
+                p = os.path.join(root, f)
+                try:
+                    cur = os.stat(p).st_mode & 0o777
+                    if cur not in (0o644, 0o755):
+                        os.chmod(p, 0o644)
+                        changed += 1
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    return changed
+
+
+def verify_htdocs_readable(verbose: bool = True) -> bool:
+    """Return True if htdocs + index.php are readable/traversable."""
+    ok = True
+
+    if not HTDOCS_DIR.exists():
+        if verbose:
+            print(f"\033[1;31m [!] Web root missing: {HTDOCS_DIR} \033[0m")
+        return False
+
+    if not os.access(str(HTDOCS_DIR), os.R_OK):
+        if verbose:
+            print(f"\033[1;31m [!] Web root not readable: {HTDOCS_DIR} \033[0m")
+        ok = False
+
+    if not os.access(str(HTDOCS_DIR), os.X_OK):
+        if verbose:
+            print(f"\033[1;31m [!] Web root not traversable (no x): {HTDOCS_DIR} \033[0m")
+        ok = False
+
+    idx = HTDOCS_DIR / "index.php"
+    if not idx.exists():
+        if verbose:
+            print(f"\033[1;31m [!] index.php missing in {HTDOCS_DIR} \033[0m")
+        ok = False
+    else:
+        try:
+            idx.read_text()
+        except Exception as e:
+            if verbose:
+                print(f"\033[1;31m [!] Cannot read {idx}: {e} \033[0m")
+            ok = False
+
+    # Try listing (catches FUSE issues)
+    try:
+        list(HTDOCS_DIR.iterdir())
+    except Exception as e:
+        if verbose:
+            print(f"\033[1;31m [!] Cannot list web root: {e} \033[0m")
+        ok = False
+
+    return ok
+
+
+def print_htdocs_diagnostic():
+    """Print a detailed diagnostic about the web root."""
+    print("\033[1;36m [i] Web root diagnostic: \033[0m")
+    print(f"\033[1;36m     path      : {HTDOCS_DIR} \033[0m")
+    try:
+        real = HTDOCS_DIR.resolve()
+        print(f"\033[1;36m     realpath  : {real} \033[0m")
+    except Exception as e:
+        print(f"\033[1;33m     realpath  : (resolve failed: {e}) \033[0m")
+
+    if HTDOCS_DIR.exists():
+        try:
+            st = HTDOCS_DIR.stat()
+            print(f"\033[1;36m     mode      : {oct(st.st_mode & 0o777)} \033[0m")
+            print(f"\033[1;36m     uid/gid   : {st.st_uid}/{st.st_gid} \033[0m")
+        except Exception:
+            pass
+        idx = HTDOCS_DIR / "index.php"
+        if idx.exists():
+            try:
+                st = idx.stat()
+                print(f"\033[1;36m     index.php : {oct(st.st_mode & 0o777)} \033[0m")
+            except Exception:
+                pass
+
+
+# ---------------------------------------------------------------------------
 # MariaDB
 # ---------------------------------------------------------------------------
 def setup_mariadb():
-    """Initialize MariaDB, harden, then stop cleanly."""
     try:
         data_dir = PREFIX / "var/lib/mysql"
         run_dir = PREFIX / "var/run/mysqld"
@@ -437,6 +525,7 @@ http {{
     default_type application/octet-stream;
     sendfile on;
     keepalive_timeout 65;
+    disable_symlinks off;
 
     access_log {PREFIX}/var/log/nginx-access.log;
     error_log  {PREFIX}/var/log/nginx-error.log;
@@ -459,7 +548,6 @@ http {{
 
     server {{
         listen 8080;
-        listen [::]:8080;
         server_name localhost;
         root {HTDOCS_DIR};
         index index.php index.html index.htm;
@@ -510,7 +598,6 @@ http {{
 
     server {{
         listen 8443 ssl;
-        listen [::]:8443 ssl;
         server_name localhost;
 
         ssl_certificate "{cert_path}";
@@ -579,42 +666,28 @@ http {{
 
 
 # ---------------------------------------------------------------------------
-# php.ini  +  conf.d management (DETERMINISTIC — caches ext_dir once)
+# php.ini + conf.d management
 # ---------------------------------------------------------------------------
 def create_php_ini():
-    """
-    Write php.ini and keep conf.d/*.ini in sync.
-
-    KEY FIX: we compute `extension_dir`, `available .so files`, and
-    `loaded extensions` ONCE at the start, then use these cached values
-    for every subsequent check. This prevents the contradictory
-    'registered' then 'missing' report caused by conf.d changes
-    affecting later `php -r` calls.
-    """
     php_ini_path = get_php_ini_path()
     PHP_CONFD_DIR.mkdir(parents=True, exist_ok=True)
     TMP_DIR.mkdir(parents=True, exist_ok=True)
 
-    # --- 1. Clean legacy 'extension=' lines ---
     removed = clean_php_ini_legacy(php_ini_path)
     if removed:
         print(f"\033[1;33m [*] Removed {removed} legacy 'extension=' line(s) from php.ini \033[0m")
 
-    # --- 2. Discover extension_dir ONCE (using -n to avoid conf.d) ---
     ext_dir = php_extension_dir()
     print(f"\033[1;36m [i] PHP extension_dir = {ext_dir} \033[0m")
 
-    # --- 3. Scan available .so files ONCE ---
     available_so = scan_available_so(ext_dir)
     if available_so:
         print(f"\033[1;36m [i] Available .so files: {', '.join(sorted(available_so))} \033[0m")
     else:
         print(f"\033[1;33m [i] No .so files found in {ext_dir} \033[0m")
 
-    # --- 4. Snapshot loaded extensions ONCE (before our conf.d changes) ---
     loaded_before = php_loaded_extensions()
 
-    # --- 5. Write fresh php.ini ---
     php_ini_content = f"""\
 upload_max_filesize = 512M
 post_max_size = 512M
@@ -650,12 +723,10 @@ session.gc_maxlifetime = 1440
         print(f"\033[1;31m [!] php.ini error: {e}\033[0m")
         return False
 
-    # --- 6. Sync conf.d using CACHED data (no new subprocess calls) ---
     synced_so = []
     for ext in PHP_EXPECTED_EXTENSIONS:
         ini_file = PHP_CONFD_DIR / f"{ext}.ini"
 
-        # Case A: already loaded → no conf.d needed
         if ext in loaded_before:
             if ini_file.exists():
                 try:
@@ -664,7 +735,6 @@ session.gc_maxlifetime = 1440
                     pass
             continue
 
-        # Case B: .so available → register
         if ext in available_so:
             desired = f"extension={ext}.so\n"
             try:
@@ -675,7 +745,6 @@ session.gc_maxlifetime = 1440
                 pass
             continue
 
-        # Case C: no .so → remove stale conf.d
         if ini_file.exists():
             try:
                 ini_file.unlink()
@@ -685,13 +754,11 @@ session.gc_maxlifetime = 1440
     if synced_so:
         print(f"\033[1;32m [✓] Registered via conf.d: {', '.join(synced_so)} \033[0m")
 
-    # --- 7. Report loaded extensions ---
     loaded_sorted = sorted(loaded_before)
     preview = ", ".join(loaded_sorted[:15])
     suffix = "..." if len(loaded_sorted) > 15 else ""
     print(f"\033[1;32m [✓] PHP loaded {len(loaded_sorted)} extensions: {preview}{suffix} \033[0m")
 
-    # --- 8. Missing packages (using CACHED data only) ---
     missing_pkgs = []
     for ext, pkg in sorted(PHP_EXT_PACKAGES.items()):
         if ext in loaded_before:
@@ -706,13 +773,11 @@ session.gc_maxlifetime = 1440
     else:
         print("\033[1;32m [✓] All available PHP extension packages are installed. \033[0m")
 
-    # --- 9. Diagnostic: reconcile with pkg list-installed ---
     installed_pkgs = list_installed_php_packages()
     if installed_pkgs:
         print(f"\033[1;36m [i] Termux php-* packages installed: "
               f"{', '.join(sorted(installed_pkgs))} \033[0m")
 
-        # Warn if a package is installed but its .so wasn't found where PHP looks
         for ext, pkg in sorted(PHP_EXT_PACKAGES.items()):
             if pkg in installed_pkgs and ext not in available_so and ext not in loaded_before:
                 print(f"\033[1;33m [!] {pkg} is installed but {ext}.so was not "
@@ -734,6 +799,14 @@ def setup_htdocs():
         info_dir = HTDOCS_DIR / "phpinfo"
         info_dir.mkdir(exist_ok=True)
         (info_dir / "index.php").write_text("<?php phpinfo(); ?>")
+
+        # Enforce permissions so nginx can read/traverse
+        changed = enforce_htdocs_permissions()
+        if changed:
+            print(f"\033[1;32m [✓] htdocs permissions normalized ({changed} entries). \033[0m")
+        else:
+            print("\033[1;32m [✓] htdocs permissions already correct. \033[0m")
+
         return True
     except Exception as e:
         print(f"\033[1;31m [!] htdocs error: {e}\033[0m")
@@ -807,6 +880,9 @@ def install_phpmyadmin():
         pma_tmp = pma_dir / "tmp"
         pma_tmp.mkdir(exist_ok=True)
 
+        # Enforce permissions for phpmyadmin as well
+        enforce_htdocs_permissions()
+
         if is_update:
             print("\033[1;32m [✓] phpMyAdmin updated successfully. \033[0m")
         else:
@@ -818,7 +894,7 @@ def install_phpmyadmin():
 
 
 # ---------------------------------------------------------------------------
-# myserver CLI (bash)
+# myserver CLI
 # ---------------------------------------------------------------------------
 def create_myserver_cli():
     bin_path = PREFIX / "bin/myserver"
@@ -867,7 +943,6 @@ has_internet() {{
 }}
 
 sync_php_extensions() {{
-    # Use `php -n` (no ini/conf.d) to get the compile-time extension_dir.
     local ext_dir
     ext_dir=$(php -n -r 'echo ini_get("extension_dir");' 2>/dev/null | tail -n1)
     [ -z "$ext_dir" ] && ext_dir="$PHP_LIB_DIR"
@@ -887,6 +962,41 @@ sync_php_extensions() {{
             rm -f "$PHP_CONFD_DIR/$ext.ini"
         fi
     done
+}}
+
+check_webroot() {{
+    if [ ! -d "$HTDOCS_DIR" ]; then
+        echo -e "\033[1;31m[!] Web root missing: $HTDOCS_DIR\033[0m"
+        return 1
+    fi
+    if [ ! -r "$HTDOCS_DIR" ] || [ ! -x "$HTDOCS_DIR" ]; then
+        echo -e "\033[1;31m[!] Web root not readable/traversable: $HTDOCS_DIR\033[0m"
+        echo -e "\033[1;33m[*] Running auto-fix...\033[0m"
+        fix_permissions_silent
+        return 0
+    fi
+    return 0
+}}
+
+fix_permissions_silent() {{
+    [ -d "$HTDOCS_DIR" ] || return 0
+    chmod 755 "$HTDOCS_DIR" 2>/dev/null
+    find "$HTDOCS_DIR" -type d -exec chmod 755 {{}} \; 2>/dev/null
+    find "$HTDOCS_DIR" -type f -exec chmod 644 {{}} \; 2>/dev/null
+}}
+
+fix_permissions() {{
+    echo -e "\033[1;34m[*] Fixing htdocs permissions...\033[0m"
+    if [ ! -d "$HTDOCS_DIR" ]; then
+        echo -e "\033[1;31m[!] Web root does not exist: $HTDOCS_DIR\033[0m"
+        read -p "Press Enter to continue..."
+        return
+    fi
+    fix_permissions_silent
+    echo -e "\033[1;32m[OK] Permissions fixed (dirs 755, files 644).\033[0m"
+    echo -e "\033[1;36m[i] Web root: $HTDOCS_DIR\033[0m"
+    ls -ld "$HTDOCS_DIR"
+    read -p "Press Enter to continue..."
 }}
 
 show_banner_and_status() {{
@@ -948,6 +1058,7 @@ show_banner_and_status() {{
 
 start_services() {{
     sync_php_extensions
+    check_webroot
 
     echo -e "\033[1;34m[+] Starting MariaDB...\033[0m"
     mkdir -p "$PREFIX/var/lib/mysql" "$PREFIX/var/run/mysqld"
@@ -1153,6 +1264,7 @@ install_wordpress() {{
         mysql -u root --socket="$MARIADB_SOCKET" -e "CREATE DATABASE IF NOT EXISTS wordpress DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" 2>/dev/null
     fi
 
+    fix_permissions_silent
     echo -e "\033[1;32m[✓] WordPress installed!\033[0m"
     echo -e " URL      : \033[1;34mhttp://localhost:8080/wordpress\033[0m"
     echo -e " Database : \033[1;33mwordpress\033[0m (User: root, Pass: [empty])"
@@ -1185,6 +1297,7 @@ install_laravel() {{
         mysql -u root --socket="$MARIADB_SOCKET" -e "CREATE DATABASE IF NOT EXISTS \`$DB_NAME\` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" 2>/dev/null
     fi
 
+    fix_permissions_silent
     echo -e "\033[1;32m[✓] Laravel installed!\033[0m"
     echo -e " URL      : \033[1;34mhttp://localhost:8080/$PROJECT_NAME/public\033[0m"
     echo -e " Database : \033[1;33m$DB_NAME\033[0m"
@@ -1231,6 +1344,7 @@ FLUSH PRIVILEGES;
 SQL
     fi
 
+    fix_permissions_silent
     echo -e "\033[1;32m[✓] Nextcloud installed!\033[0m"
     echo -e " URL      : \033[1;34mhttp://localhost:8080/nextcloud\033[0m"
     echo -e " Database : \033[1;33mnextcloud\033[0m"
@@ -1418,8 +1532,9 @@ if [ -n "$1" ]; then
         reinstall) reinstall_server ;;
         internet-enable|enable-internet) enable_internet ;;
         internet-disable|disable-internet) disable_internet ;;
+        fixperms|fix-permissions) fix_permissions ;;
         delete|uninstall) uninstall_server ;;
-        *) echo "Usage: myserver [start|stop|restart|status|quickstart|update|reinstall|internet-enable|internet-disable|uninstall]" ;;
+        *) echo "Usage: myserver [start|stop|restart|status|quickstart|update|reinstall|internet-enable|internet-disable|fixperms|uninstall]" ;;
     esac
     exit 0
 fi
@@ -1458,9 +1573,10 @@ while true; do
     echo -e "\033[1;33m 6) update           (Check and apply updates)\033[0m"
     echo -e "\033[1;33m 7) reinstall        (To fix issues)\033[0m"
     echo -e "\033[1;33m 8) uninstall        (Remove server stack)\033[0m"
-    echo -e "\033[1;33m 9) exit             (Exit & Stop Server)\033[0m"
+    echo -e "\033[1;33m 9) fix-permissions  (Fix Access Denied / 403 errors)\033[0m"
+    echo -e "\033[1;33m 0) exit             (Exit & Stop Server)\033[0m"
     echo ""
-    read -p $'\033[1;33mEnter choice [1-9]: \033[0m' choice
+    read -p $'\033[1;33mEnter choice [0-9]: \033[0m' choice
 
     case "$choice" in
         1)
@@ -1485,7 +1601,8 @@ while true; do
         6|update) update_server manual ;;
         7|reinstall) reinstall_server ;;
         8|uninstall|delete) uninstall_server ;;
-        9|exit)
+        9|fixperms|fix-permissions) fix_permissions ;;
+        0|exit)
             stop_services
             echo -e "\033[1;32mServer stopped and exited successfully.\033[0m"
             exit 0
@@ -1586,6 +1703,18 @@ def main():
                     raise Exception(f"Failed at step: {desc}")
             elif isinstance(action, str):
                 run_cmd(action)
+
+        # Final: enforce permissions again (in case phpMyAdmin extraction
+        # overwrote some files after the earlier chmod pass)
+        enforce_htdocs_permissions()
+
+        # Diagnostic
+        print_htdocs_diagnostic()
+        if not verify_htdocs_readable():
+            print("\033[1;33m [!] Web root readability check FAILED. Nginx may return 403. \033[0m")
+            print("\033[1;33m     Try: myserver fixperms \033[0m")
+        else:
+            print("\033[1;32m [✓] Web root is readable by all users. \033[0m")
 
         missing = [c for c in ["nginx", "php", "php-fpm", "mysqld", "redis-server"]
                    if not command_exists(c)]
