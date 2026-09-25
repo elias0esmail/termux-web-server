@@ -11,19 +11,18 @@ import string
 from pathlib import Path
 
 # Current Version & Release Notes
-CURRENT_VERSION = "2.14.0"
+CURRENT_VERSION = "2.15.0"
 CHANGELOG = [
-    "Fix: Removed non-existent Termux packages (php-mysqli, php-pdo-mysql, php-intl, php-bcmath)",
-    "Fix: Separate .so detection list from installable package list",
-    "Fix: Built-in extensions (mysqli, pdo_mysql, openssl) auto-detected from .so",
-    "Improvement: Only suggest packages that actually exist in Termux repos",
-    "Improvement: sync_php_extensions auto-syncs all .so on every start",
-    "Improvement: Clearer final report (all present vs missing list)",
-    "Fix: (carried) PHP extension warnings via conf.d auto-generated .ini files",
-    "Fix: (carried) Auto-clean legacy 'extension=' lines from php.ini",
-    "Fix: (carried) Explicit extension_dir set in php.ini",
+    "Fix: Real Termux PHP 8.5 extension model (built-in vs packaged)",
+    "Fix: Use `php -m` as source of truth instead of scanning .so paths",
+    "Fix: Correct package names (php-sodium, php-redis, php-apcu, php-imagick)",
+    "Fix: Remove non-existent packages (php-mysqli, php-curl, php-zip, php-xml, ...)",
+    "Fix: Auto-detect PHP's real extension_dir via `php -r`",
+    "Improvement: Cleaner install report (loaded vs optional vs missing)",
+    "Improvement: sync_php_extensions now uses php -m for accuracy",
     "Security: (carried) PHP path traversal fix + phpMyAdmin AllowNoPassword OFF",
     "Fix: (carried) MariaDB stopped cleanly after installation",
+    "Fix: (carried) conf.d auto-generation with stale cleanup",
 ]
 
 # System and Environment Paths
@@ -42,32 +41,44 @@ REPO_DIR = Path(__file__).resolve().parent
 GITHUB_RAW_URL = "https://raw.githubusercontent.com/elias0esmail/termux-web-server/main"
 
 # ---------------------------------------------------------------------------
-# PHP extension inventory
+# PHP extension inventory (verified against Termux PHP 8.5.1, Dec 2025)
 # ---------------------------------------------------------------------------
-# Extensions to LOOK FOR as .so files in $PREFIX/lib/php/.
-# Some of them (mysqli, pdo_mysql, openssl) are BUILT INTO the main 'php'
-# package in Termux and do NOT have their own installable package.
-PHP_EXT_SO_NAMES = [
+
+# Extensions we EXPECT to be available after install.
+# Built-in ones are compiled INTO the main 'php' package — no .so file,
+# no separate installable package.
+PHP_EXPECTED_EXTENSIONS = [
+    # Built-in to the main php package:
     "mysqli",
     "pdo_mysql",
     "mbstring",
     "openssl",
     "curl",
     "zip",
-    "gd",
     "xml",
     "intl",
     "bcmath",
+    # Provided by separate Termux packages (checked at runtime):
+    "gd",
+    "sodium",
+    "redis",
+    "apcu",
 ]
 
-# Only extensions whose Termux packages ACTUALLY EXIST in the repos.
-# Used solely to generate user-facing "pkg install ..." hints.
+# Extensions bundled INSIDE the main php package (no .so lookup needed).
+PHP_BUILTIN_EXTENSIONS = {
+    "mysqli", "pdo_mysql", "mbstring", "openssl",
+    "curl", "zip", "xml", "intl", "bcmath",
+}
+
+# Termux packages that ACTUALLY EXIST and provide PHP extensions.
+# Source: `pkg search php` on Termux PHP 8.5.1.
 PHP_EXT_PACKAGES = {
-    "gd":       "php-gd",
-    "curl":     "php-curl",
-    "mbstring": "php-mbstring",
-    "zip":      "php-zip",
-    "xml":      "php-xml",
+    "gd":      "php-gd",
+    "sodium":  "php-sodium",
+    "redis":   "php-redis",
+    "apcu":    "php-apcu",
+    "imagick": "php-imagick",
 }
 
 
@@ -111,22 +122,58 @@ def get_php_confd_dir() -> Path:
     return PHP_CONFD_DIR
 
 
+# ---------------------------------------------------------------------------
+# PHP introspection helpers (source of truth = the php binary itself)
+# ---------------------------------------------------------------------------
+def php_loaded_extensions() -> set:
+    """Return the set of extensions PHP reports as loaded (lowercase)."""
+    try:
+        r = subprocess.run(["php", "-m"], capture_output=True,
+                           text=True, timeout=15)
+        if r.returncode == 0:
+            return {
+                ln.strip().lower()
+                for ln in r.stdout.splitlines()
+                if ln.strip() and not ln.strip().startswith("[")
+            }
+    except Exception:
+        pass
+    return set()
+
+
+def php_extension_dir() -> Path:
+    """Ask PHP itself where its extension_dir is."""
+    try:
+        r = subprocess.run(
+            ["php", "-r", 'echo ini_get("extension_dir");'],
+            capture_output=True, text=True, timeout=5
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            return Path(r.stdout.strip())
+    except Exception:
+        pass
+    return PHP_LIB_DIR
+
+
+def php_ext_loaded(name: str) -> bool:
+    """True if PHP currently reports this extension as loaded."""
+    return name.lower() in php_loaded_extensions()
+
+
 def php_ext_so_exists(name: str) -> bool:
-    """True only if the actual .so file exists on disk."""
-    if not PHP_LIB_DIR.exists():
+    """True if a physical .so exists in PHP's real extension_dir."""
+    ext_dir = php_extension_dir()
+    if not ext_dir.exists():
         return False
-    return (PHP_LIB_DIR / f"{name}.so").exists()
+    return (ext_dir / f"{name}.so").exists()
 
 
 def php_ext_installed(name: str) -> bool:
-    """True if .so exists OR a conf.d ini references it."""
+    """An extension is 'installed' if PHP reports it OR a .so exists."""
+    if php_ext_loaded(name):
+        return True
     if php_ext_so_exists(name):
         return True
-    confd = get_php_confd_dir()
-    if confd.exists():
-        ini = confd / f"{name}.ini"
-        if ini.exists():
-            return True
     return False
 
 
@@ -496,27 +543,29 @@ http {{
 
 
 # ---------------------------------------------------------------------------
-# php.ini  +  conf.d management
+# php.ini  +  conf.d management (source of truth = `php -m`)
 # ---------------------------------------------------------------------------
 def create_php_ini():
     """
-    1. Clean legacy 'extension=' lines from php.ini (source of warnings).
-    2. Write a fresh php.ini with extension_dir set correctly.
-    3. Generate per-extension .ini files in conf.d for every .so that
-       actually exists on disk.
-    4. Remove stale conf.d .ini files for extensions that are gone.
-    5. Report ONLY truly missing installable packages (php-gd, etc.).
+    Write php.ini and keep conf.d/*.ini in sync with reality.
+
+    Uses `php -m` as the source of truth (NOT .so scanning) because many
+    extensions are compiled INTO the php binary in Termux and have no .so.
     """
     php_ini_path = get_php_ini_path()
     PHP_CONFD_DIR.mkdir(parents=True, exist_ok=True)
     TMP_DIR.mkdir(parents=True, exist_ok=True)
 
-    # --- 1. Clean up legacy lines ---
+    # --- 1. Clean legacy 'extension=' lines ---
     removed = clean_php_ini_legacy(php_ini_path)
     if removed:
         print(f"\033[1;33m [*] Removed {removed} legacy 'extension=' line(s) from php.ini \033[0m")
 
-    # --- 2. Write clean php.ini ---
+    # --- 2. Discover PHP's real extension_dir ---
+    ext_dir = php_extension_dir()
+    print(f"\033[1;36m [i] PHP extension_dir = {ext_dir} \033[0m")
+
+    # --- 3. Write fresh php.ini ---
     php_ini_content = f"""\
 upload_max_filesize = 512M
 post_max_size = 512M
@@ -527,8 +576,7 @@ display_errors = On
 date.timezone = UTC
 
 ; --- Extensions ---
-; Explicit path so PHP finds the .so files installed by php-* packages.
-extension_dir = "{PHP_LIB_DIR}"
+extension_dir = "{ext_dir}"
 ; NOTE: Do NOT add `extension=` lines here. conf.d/*.ini handles them.
 
 ; Security: prevent path traversal in FPM
@@ -553,42 +601,61 @@ session.gc_maxlifetime = 1440
         print(f"\033[1;31m [!] php.ini error: {e}\033[0m")
         return False
 
-    # --- 3. Regenerate conf.d .ini files for EXISTING .so files only ---
-    installed_exts = []
-    for ext in PHP_EXT_SO_NAMES:
+    # --- 4. Sync conf.d for external .so extensions only ---
+    loaded = php_loaded_extensions()
+    synced_so = []
+    for ext in PHP_EXPECTED_EXTENSIONS:
+        # Skip built-ins already loaded (no .so needed)
+        if ext in PHP_BUILTIN_EXTENSIONS and ext in loaded:
+            continue
+
         ini_file = PHP_CONFD_DIR / f"{ext}.ini"
+
+        if ext in loaded:
+            # Already loaded (php auto-registered it) → no conf.d needed
+            if ini_file.exists():
+                try:
+                    ini_file.unlink()
+                except Exception:
+                    pass
+            continue
+
         if php_ext_so_exists(ext):
             desired = f"extension={ext}.so\n"
             try:
                 if not ini_file.exists() or ini_file.read_text() != desired:
                     ini_file.write_text(desired)
+                    synced_so.append(ext)
             except Exception:
                 pass
-            installed_exts.append(ext)
         else:
-            # Remove stale conf.d file to silence warnings
+            # No .so → remove any stale conf.d
             try:
                 if ini_file.exists():
                     ini_file.unlink()
             except Exception:
                 pass
 
-    if installed_exts:
-        print(f"\033[1;32m [✓] Enabled PHP extensions: {', '.join(installed_exts)} \033[0m")
-    else:
-        print("\033[1;33m [!] No PHP extension .so files detected in lib/php \033[0m")
+    if synced_so:
+        print(f"\033[1;32m [✓] Registered via conf.d: {', '.join(synced_so)} \033[0m")
 
-    # --- 4. Report only truly missing packages (that actually exist in repos) ---
-    missing_pkgs = sorted({
-        pkg for ext, pkg in PHP_EXT_PACKAGES.items()
-        if not php_ext_so_exists(ext)
-    })
+    # --- 5. Report loaded extensions ---
+    loaded_sorted = sorted(loaded)
+    preview = ", ".join(loaded_sorted[:15])
+    suffix = "..." if len(loaded_sorted) > 15 else ""
+    print(f"\033[1;32m [✓] PHP loaded extensions: {preview}{suffix} \033[0m")
+
+    # --- 6. Report only REAL missing packages (that actually exist in repos) ---
+    missing_pkgs = []
+    for ext, pkg in sorted(PHP_EXT_PACKAGES.items()):
+        if ext not in loaded and not php_ext_so_exists(ext):
+            missing_pkgs.append(pkg)
 
     if missing_pkgs:
-        print(f"\033[1;33m [!] Optional PHP extensions not installed: {', '.join(missing_pkgs)}\033[0m")
-        print(f"\033[1;33m     To install: pkg install {' '.join(missing_pkgs)}\033[0m")
+        print(f"\033[1;33m [!] Optional packages not installed: {', '.join(missing_pkgs)} \033[0m")
+        print(f"\033[1;33m     To install: pkg install {' '.join(missing_pkgs)} \033[0m")
     else:
-        print("\033[1;32m [✓] All recommended PHP extensions are present. \033[0m")
+        print("\033[1;32m [✓] All available PHP extension packages are installed. \033[0m")
 
     return True
 
@@ -739,11 +806,22 @@ has_internet() {{
 }}
 
 sync_php_extensions() {{
-    # Regenerate conf.d/*.ini based on actual .so presence.
-    # Keeps PHP silent (no startup warnings) after any package change.
-    mkdir -p "$PHP_CONFD_DIR"
-    for ext in mysqli pdo_mysql mbstring openssl curl zip gd xml intl bcmath; do
-        if [ -f "$PHP_LIB_DIR/$ext.so" ]; then
+    # Source of truth = php -m (many extensions are built into php in Termux).
+    local ext_dir
+    ext_dir=$(php -r 'echo ini_get("extension_dir");' 2>/dev/null)
+    [ -z "$ext_dir" ] && ext_dir="$PHP_LIB_DIR"
+    mkdir -p "$ext_dir" "$PHP_CONFD_DIR" 2>/dev/null
+
+    local loaded
+    loaded=$(php -m 2>/dev/null | tr 'A-Z' 'a-z')
+
+    for ext in gd sodium redis apcu imagick; do
+        if echo "$loaded" | grep -qx "$ext"; then
+            # Already loaded → clean any leftover conf.d
+            rm -f "$PHP_CONFD_DIR/$ext.ini"
+            continue
+        fi
+        if [ -f "$ext_dir/$ext.so" ]; then
             echo "extension=$ext.so" > "$PHP_CONFD_DIR/$ext.ini"
         else
             rm -f "$PHP_CONFD_DIR/$ext.ini"
@@ -1245,7 +1323,7 @@ uninstall_server() {{
             rm -f "$TUNNEL_PID_FILE" "$TUNNEL_URL_FILE" "$TUNNEL_LOG"
 
             # Remove generated conf.d files (only ours)
-            for ext in mysqli pdo_mysql mbstring openssl curl zip gd xml intl bcmath; do
+            for ext in gd sodium redis apcu imagick mysqli pdo_mysql mbstring openssl curl zip xml intl bcmath; do
                 rm -f "$PHP_CONFD_DIR/$ext.ini"
             done
 
@@ -1417,7 +1495,9 @@ def main():
             if removed:
                 print(f"\033[1;33m [*] Pre-flight: removed {removed} legacy 'extension=' line(s) from php.ini \033[0m")
 
-        # Only install packages that ACTUALLY EXIST in Termux repos
+        # Only install packages that ACTUALLY EXIST in Termux repos.
+        # Built-in extensions (mysqli, curl, zip, mbstring, ...) ship inside
+        # the main php package and require no separate install.
         php_ext_pkgs = " ".join(sorted(set(PHP_EXT_PACKAGES.values())))
         core_pkgs = (
             "nginx php php-fpm mariadb redis openssl-tool "
