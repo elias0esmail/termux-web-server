@@ -11,13 +11,12 @@ import string
 from pathlib import Path
 
 # Current Version & Release Notes
-CURRENT_VERSION = "2.16.1"
+CURRENT_VERSION = "2.16.2"
 CHANGELOG = [
-    "Fix: Access denied (403) — enforce htdocs permissions 755/644",
-    "Fix: Auto-fix htdocs permissions on every 'myserver start'",
-    "New: 'myserver fixperms' command for manual permission repair",
-    "New: Web root readability diagnostic at install & start",
-    "Improvement: imagick added to conf.d auto-registration",
+    "Fix: 'Access to the script ... has been denied' (403 on /, /phpmyadmin/)",
+    "Fix: Nginx config no longer relies on 'index' + 'try_files $uri/' on FUSE",
+    "New: Explicit 'location ~ ^(.*)/$' handler maps /dir/ to /dir/index.php",
+    "Improvement: imagick active in conf.d (already present since 2.16.1)",
     "Fix: (carried) Deterministic PHP extension detection",
     "Security: (carried) PHP path traversal fix + phpMyAdmin AllowNoPassword OFF",
     "Fix: (carried) MariaDB stopped cleanly after installation",
@@ -213,20 +212,12 @@ def list_installed_php_packages() -> set:
 
 
 # ---------------------------------------------------------------------------
-# Web root helpers (Access denied fix)
+# Web root helpers
 # ---------------------------------------------------------------------------
 def enforce_htdocs_permissions() -> int:
-    """
-    Make sure nginx can read the web root:
-      - directories: 755 (r-x for everyone)
-      - files:       644 (r-- for everyone)
-    Returns the number of entries changed (0 if already fine).
-    """
     if not HTDOCS_DIR.exists():
         return 0
     changed = 0
-
-    # Top directory
     try:
         cur = HTDOCS_DIR.stat().st_mode & 0o777
         if cur != 0o755:
@@ -234,8 +225,6 @@ def enforce_htdocs_permissions() -> int:
             changed += 1
     except Exception:
         pass
-
-    # Recursive
     try:
         for root, dirs, files in os.walk(HTDOCS_DIR):
             for d in dirs:
@@ -258,29 +247,23 @@ def enforce_htdocs_permissions() -> int:
                     pass
     except Exception:
         pass
-
     return changed
 
 
 def verify_htdocs_readable(verbose: bool = True) -> bool:
-    """Return True if htdocs + index.php are readable/traversable."""
     ok = True
-
     if not HTDOCS_DIR.exists():
         if verbose:
             print(f"\033[1;31m [!] Web root missing: {HTDOCS_DIR} \033[0m")
         return False
-
     if not os.access(str(HTDOCS_DIR), os.R_OK):
         if verbose:
             print(f"\033[1;31m [!] Web root not readable: {HTDOCS_DIR} \033[0m")
         ok = False
-
     if not os.access(str(HTDOCS_DIR), os.X_OK):
         if verbose:
-            print(f"\033[1;31m [!] Web root not traversable (no x): {HTDOCS_DIR} \033[0m")
+            print(f"\033[1;31m [!] Web root not traversable: {HTDOCS_DIR} \033[0m")
         ok = False
-
     idx = HTDOCS_DIR / "index.php"
     if not idx.exists():
         if verbose:
@@ -293,28 +276,23 @@ def verify_htdocs_readable(verbose: bool = True) -> bool:
             if verbose:
                 print(f"\033[1;31m [!] Cannot read {idx}: {e} \033[0m")
             ok = False
-
-    # Try listing (catches FUSE issues)
     try:
         list(HTDOCS_DIR.iterdir())
     except Exception as e:
         if verbose:
             print(f"\033[1;31m [!] Cannot list web root: {e} \033[0m")
         ok = False
-
     return ok
 
 
 def print_htdocs_diagnostic():
-    """Print a detailed diagnostic about the web root."""
     print("\033[1;36m [i] Web root diagnostic: \033[0m")
     print(f"\033[1;36m     path      : {HTDOCS_DIR} \033[0m")
     try:
         real = HTDOCS_DIR.resolve()
         print(f"\033[1;36m     realpath  : {real} \033[0m")
     except Exception as e:
-        print(f"\033[1;33m     realpath  : (resolve failed: {e}) \033[0m")
-
+        print(f"\033[1;33m     realpath  : (failed: {e}) \033[0m")
     if HTDOCS_DIR.exists():
         try:
             st = HTDOCS_DIR.stat()
@@ -508,13 +486,60 @@ IP.2 = ::1
 
 
 # ---------------------------------------------------------------------------
-# Nginx
+# Nginx  (v2.16.2 — explicit directory handling, no reliance on 'index')
 # ---------------------------------------------------------------------------
 def setup_nginx():
     try:
         conf_path = NGINX_DIR / "nginx.conf"
         cert_path = SSL_DIR / "server.crt"
         key_path = SSL_DIR / "server.key"
+
+        # Common location blocks used by both HTTP and HTTPS servers.
+        # NOTE: We do NOT use `try_files $uri $uri/ ...` because on Termux's
+        # FUSE-mounted htdocs, nginx's directory stat can fail and end up
+        # passing the bare directory path to PHP-FPM. This triggers:
+        #   "Access to the script '.../htdocs' has been denied"
+        # Instead we explicitly rewrite any trailing-slash URI to $1/index.php.
+        common_locations = f"""\
+        # 1) phpMyAdmin PHP files (rate-limited)
+        location ~ ^/phpmyadmin/.*\\.php$ {{
+            limit_req zone=pma_zone burst=5 nodelay;
+            try_files $uri =404;
+            include fastcgi_params;
+            fastcgi_pass php_fpm;
+            fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+            fastcgi_read_timeout 300;
+        }}
+
+        # 2) Any URI ending in "/" → serve "$1/index.php" via FastCGI
+        location ~ ^(.*)/$ {{
+            try_files $1/index.php =404;
+            include fastcgi_params;
+            fastcgi_pass php_fpm;
+            fastcgi_param SCRIPT_FILENAME $document_root$1/index.php;
+            fastcgi_param PATH_INFO "";
+            fastcgi_read_timeout 300;
+        }}
+
+        # 3) Any .php file
+        location ~ \\.php$ {{
+            try_files $uri =404;
+            include fastcgi_params;
+            fastcgi_pass php_fpm;
+            fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+            fastcgi_read_timeout 300;
+        }}
+
+        # 4) Everything else: static files, then WordPress/Laravel/Nextcloud fallback
+        location / {{
+            try_files $uri /index.php?$args;
+        }}
+
+        # 5) Block hidden files
+        location ~ /\\. {{
+            deny all;
+        }}
+"""
 
         nginx_config = f"""\
 worker_processes 2;
@@ -525,7 +550,6 @@ http {{
     default_type application/octet-stream;
     sendfile on;
     keepalive_timeout 65;
-    disable_symlinks off;
 
     access_log {PREFIX}/var/log/nginx-access.log;
     error_log  {PREFIX}/var/log/nginx-error.log;
@@ -556,44 +580,7 @@ http {{
         add_header X-Content-Type-Options "nosniff" always;
         add_header Referrer-Policy "strict-origin-when-cross-origin" always;
 
-        location / {{
-            try_files $uri $uri/ /index.php?$args;
-        }}
-
-        location ~ ^/laravel/ {{
-            try_files $uri $uri/ /laravel/public/index.php?$query_string;
-        }}
-
-        location ~ ^/nextcloud/ {{
-            try_files $uri $uri/ /nextcloud/index.php$request_uri;
-        }}
-
-        location ~ ^/phpmyadmin/.*\\.php$ {{
-            limit_req zone=pma_zone burst=5 nodelay;
-            try_files $uri =404;
-            fastcgi_pass php_fpm;
-            fastcgi_index index.php;
-            include fastcgi_params;
-            fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
-            fastcgi_param PATH_INFO $fastcgi_path_info;
-            fastcgi_param PATH_TRANSLATED $document_root$fastcgi_path_info;
-            fastcgi_read_timeout 300;
-        }}
-
-        location ~ \\.php$ {{
-            try_files $uri =404;
-            fastcgi_pass php_fpm;
-            fastcgi_index index.php;
-            include fastcgi_params;
-            fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
-            fastcgi_param PATH_INFO $fastcgi_path_info;
-            fastcgi_param PATH_TRANSLATED $document_root$fastcgi_path_info;
-            fastcgi_read_timeout 300;
-        }}
-
-        location ~ /\\. {{
-            deny all;
-        }}
+{common_locations}
     }}
 
     server {{
@@ -614,51 +601,14 @@ http {{
         add_header X-Content-Type-Options "nosniff" always;
         add_header Referrer-Policy "strict-origin-when-cross-origin" always;
 
-        location / {{
-            try_files $uri $uri/ /index.php?$args;
-        }}
-
-        location ~ ^/laravel/ {{
-            try_files $uri $uri/ /laravel/public/index.php?$query_string;
-        }}
-
-        location ~ ^/nextcloud/ {{
-            try_files $uri $uri/ /nextcloud/index.php$request_uri;
-        }}
-
-        location ~ ^/phpmyadmin/.*\\.php$ {{
-            limit_req zone=pma_zone burst=5 nodelay;
-            try_files $uri =404;
-            fastcgi_pass php_fpm;
-            fastcgi_index index.php;
-            include fastcgi_params;
-            fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
-            fastcgi_param PATH_INFO $fastcgi_path_info;
-            fastcgi_param PATH_TRANSLATED $document_root$fastcgi_path_info;
-            fastcgi_read_timeout 300;
-        }}
-
-        location ~ \\.php$ {{
-            try_files $uri =404;
-            fastcgi_pass php_fpm;
-            fastcgi_index index.php;
-            include fastcgi_params;
-            fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
-            fastcgi_param PATH_INFO $fastcgi_path_info;
-            fastcgi_param PATH_TRANSLATED $document_root$fastcgi_path_info;
-            fastcgi_read_timeout 300;
-        }}
-
-        location ~ /\\. {{
-            deny all;
-        }}
+{common_locations}
     }}
 }}
 """
         conf_path.write_text(nginx_config)
 
         (PREFIX / "var/log").mkdir(parents=True, exist_ok=True)
-        print("\033[1;32m [✓] Nginx configured (security headers, rate limiting, gzip). \033[0m")
+        print("\033[1;32m [✓] Nginx configured (FUSE-safe, explicit /dir/ handling). \033[0m")
         return True
     except Exception as e:
         print(f"\033[1;31m [!] Nginx config error: {e}\033[0m")
@@ -666,7 +616,7 @@ http {{
 
 
 # ---------------------------------------------------------------------------
-# php.ini + conf.d management
+# php.ini + conf.d
 # ---------------------------------------------------------------------------
 def create_php_ini():
     php_ini_path = get_php_ini_path()
@@ -800,7 +750,6 @@ def setup_htdocs():
         info_dir.mkdir(exist_ok=True)
         (info_dir / "index.php").write_text("<?php phpinfo(); ?>")
 
-        # Enforce permissions so nginx can read/traverse
         changed = enforce_htdocs_permissions()
         if changed:
             print(f"\033[1;32m [✓] htdocs permissions normalized ({changed} entries). \033[0m")
@@ -880,7 +829,6 @@ def install_phpmyadmin():
         pma_tmp = pma_dir / "tmp"
         pma_tmp.mkdir(exist_ok=True)
 
-        # Enforce permissions for phpmyadmin as well
         enforce_htdocs_permissions()
 
         if is_update:
@@ -1539,13 +1487,11 @@ if [ -n "$1" ]; then
     exit 0
 fi
 
-# --- Auto-update check on interactive launch (with skip guard) ---
 if [ -z "$MYSERVER_SKIP_AUTOUPDATE" ]; then
     echo -e "\033[1;36m[*] Checking for updates...\033[0m"
     sleep 0.6
     update_server auto
 fi
-# ------------------------------------------------------------------
 
 while true; do
     show_banner_and_status
@@ -1632,12 +1578,10 @@ def cleanup_repository():
                      Path('/data/data/com.termux/files')}
         if cwd in forbidden:
             return
-
         install_py = cwd / "install_server.py"
         git_dir = cwd / ".git"
         if not install_py.exists() or not git_dir.exists():
             return
-
         try:
             result = subprocess.run(
                 ["git", "-C", str(cwd), "remote", "-v"],
@@ -1647,7 +1591,6 @@ def cleanup_repository():
                 return
         except Exception:
             return
-
         print("\033[1;33m[*] Cleaning up downloaded repository folder...\033[0m")
         os.chdir(HOME)
         shutil.rmtree(cwd, ignore_errors=True)
@@ -1704,11 +1647,8 @@ def main():
             elif isinstance(action, str):
                 run_cmd(action)
 
-        # Final: enforce permissions again (in case phpMyAdmin extraction
-        # overwrote some files after the earlier chmod pass)
         enforce_htdocs_permissions()
 
-        # Diagnostic
         print_htdocs_diagnostic()
         if not verify_htdocs_readable():
             print("\033[1;33m [!] Web root readability check FAILED. Nginx may return 403. \033[0m")
