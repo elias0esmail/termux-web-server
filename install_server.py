@@ -10,7 +10,7 @@ import secrets
 import getpass
 from pathlib import Path
 
-CURRENT_VERSION = "2.20.1"
+CURRENT_VERSION = "2.20.2"
 CHANGELOG = [
     "Polish: Menu reordered — Live Reload moved to #2 with dynamic label",
     "New: Live Reload — auto-refresh browser on file changes (opt-in)",
@@ -2210,14 +2210,14 @@ while true; do
     if [ "$SERVER_RUNNING" -eq 1 ]; then
         # Dynamic labels for options 2 and 3
         if live_is_running; then
-            LIVE_LABEL="Disable Live Reload     (auto-refresh)"
+            LIVE_LABEL="Disable Live Reload (auto-refresh)"
         else
-            LIVE_LABEL="Enable Live Reload      (auto-refresh)"
+            LIVE_LABEL="Enable Live Reload  (auto-refresh)"
         fi
         if is_tunnel_running; then
-            NET_LABEL="Disable Internet        (disable internet access)"
+            NET_LABEL="Disable Internet    (disable internet access)"
         else
-            NET_LABEL="Enable Internet         (enable internet access)"
+            NET_LABEL="Enable Internet     (enable internet access)"
         fi
 
         echo -e "\033[1;33mSelect an option:\033[0m"
@@ -2225,10 +2225,10 @@ while true; do
         echo -e "\033[1;33m 2) $LIVE_LABEL\033[0m"
         echo -e "\033[1;33m 3) $NET_LABEL\033[0m"
         echo -e "\033[1;33m 4) restart             (Restart all services)\033[0m"
-        echo -e "\033[1;33m 5) quickstart          (Install WP / Laravel / Nextcloud)\033[0m"
+        echo -e "\033[1;33m 5) quickstart          (Install WP/Laravel/Nextcloud)\033[0m"
         echo -e "\033[1;33m 6) refresh status      (Re-check server status)\033[0m"
         echo -e "\033[1;33m 7) update              (Check and apply updates)\033[0m"
-        echo -e "\033[1;33m 8) reinstall           (To fix issues — keeps DBs+htdocs)\033[0m"
+        echo -e "\033[1;33m 8) reinstall           (To fix issues—keeps DBs+htdocs)\033[0m"
         echo -e "\033[1;33m 9) uninstall           (Remove server + DBs + htdocs)\033[0m"
         echo -e "\033[1;33m10) exit                (Exit & Stop Server)\033[0m"
         echo ""
