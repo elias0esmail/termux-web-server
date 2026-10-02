@@ -10,7 +10,7 @@ import secrets
 import getpass
 from pathlib import Path
 
-CURRENT_VERSION = "2.19.7"
+CURRENT_VERSION = "2.19.8"
 CHANGELOG = [
     "Fix: stop_services now reliably kills Nginx/Redis/PHP-FPM (3-stage termination)",
     "Fix: Do not delete MariaDB socket while server is running",
@@ -765,13 +765,18 @@ def setup_nginx():
             fastcgi_read_timeout 300;
         }}
 
+        
         location ~ ^(.*)/$ {{
-            try_files $1/index.php =404;
+            try_files $1/index.php @html_dir;
             include fastcgi_params;
             fastcgi_pass php_fpm;
             fastcgi_param SCRIPT_FILENAME $document_root$1/index.php;
             fastcgi_param PATH_INFO "";
             fastcgi_read_timeout 300;
+        }}
+
+        location @html_dir {{
+            rewrite ^(.*)/$ $1/index.html last;
         }}
 
         location ~ \\.php$ {{
