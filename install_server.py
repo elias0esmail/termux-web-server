@@ -10,11 +10,12 @@ import secrets
 import getpass
 from pathlib import Path
 
-CURRENT_VERSION = "2.20.0"
+CURRENT_VERSION = "2.20.1"
 CHANGELOG = [
+    "Polish: Menu reordered — Live Reload moved to #2 with dynamic label",
     "New: Live Reload — auto-refresh browser on file changes (opt-in)",
     "New: myserver live-start / live-stop / live-restart / live-status",
-    "New: Menu option #10 to toggle Live Reload",
+    "New: Menu option #2 to toggle Live Reload",
     "New: Live Reload stops with `myserver stop` (manual restart required)",
     "Fix: stop_services now reliably kills Nginx/Redis/PHP-FPM (3-stage termination)",
     "Fix: Do not delete MariaDB socket while server is running",
@@ -753,8 +754,6 @@ def setup_nginx():
         cert_path = SSL_DIR / "server.crt"
         key_path = SSL_DIR / "server.key"
 
-        # Ensure live-reload.conf exists (empty = disabled). Nginx requires the
-        # file to exist because we `include` it unconditionally.
         try:
             if not LIVE_CONF_FILE.exists():
                 LIVE_CONF_FILE.write_text("")
@@ -833,7 +832,6 @@ http {{
     sendfile on;
     keepalive_timeout 65;
 
-    # ---- Live Reload support (sub_filter) ----
     sub_filter_once on;
     sub_filter_types text/html;
 
@@ -1174,16 +1172,6 @@ def install_phpmyadmin():
 LIVE_SERVER_SCRIPT = r'''#!/data/data/com.termux/files/usr/bin/python3
 """
 myserver-live — Live Reload helper for Termux Web Server.
-
-Usage:
-    myserver-live <htdocs_dir> <port> <pid_file> <log_file>
-
-Serves:
-    GET /__live.js    → JS client (EventSource to /__live/sse)
-    GET /__live/sse   → SSE stream (broadcasts "reload" on file change)
-
-Watches:
-    <htdocs_dir> via polling (works on Android FUSE-mounted dirs).
 """
 import os
 import sys
@@ -1393,7 +1381,6 @@ def create_live_server_script() -> bool:
     try:
         LIVE_BIN_PATH.write_text(LIVE_SERVER_SCRIPT, encoding='utf-8')
         LIVE_BIN_PATH.chmod(0o755)
-        # Ensure the include file exists (empty = disabled)
         try:
             if not LIVE_CONF_FILE.exists():
                 LIVE_CONF_FILE.write_text("")
@@ -1434,7 +1421,6 @@ LIVE_LOG_FILE="{LIVE_LOG_FILE}"
 LIVE_CONF_FILE="{LIVE_CONF_FILE}"
 LIVE_BIN="{LIVE_BIN_PATH}"
 
-# If web root was overridden via file, prefer that
 if [ -f "$HTDOCS_PATH_FILE" ]; then
     SAVED=$(cat "$HTDOCS_PATH_FILE" 2>/dev/null)
     [ -n "$SAVED" ] && HTDOCS_DIR="$SAVED"
@@ -1540,7 +1526,6 @@ live_start() {{
     rm -f "$LIVE_PID_FILE" "$LIVE_LOG_FILE"
     nohup "$LIVE_BIN" "$HTDOCS_DIR" "$LIVE_PORT" "$LIVE_PID_FILE" "$LIVE_LOG_FILE" \
         > /dev/null 2>&1 &
-    # wait for pid file (max 5s)
     i=0
     while [ $i -lt 5 ]; do
         sleep 1
@@ -1562,7 +1547,6 @@ live_start() {{
 live_stop() {{
     local quiet="$1"
     if ! live_is_running; then
-        # still ensure the conf is cleared
         live_write_conf_disabled
         live_reload_nginx
         [ "$quiet" != "quiet" ] && echo -e "\033[1;33m[i] Live Reload already stopped.\033[0m"
@@ -1783,7 +1767,7 @@ start_services() {{
 
     sleep 1.5
     echo -e "\033[1;32m[OK] Services started successfully.\033[0m"
-    echo -e "\033[1;33m[*] Tip: enable Live Reload with 'myserver live-start'.\033[0m"
+    echo -e "\033[1;33m[*] Tip: enable Live Reload from menu or 'myserver live-start'.\033[0m"
     echo -e "\033[1;33m[*] Opening http://localhost:8080 in browser...\033[0m"
     open_browser
     sleep 1
@@ -1792,11 +1776,9 @@ start_services() {{
 stop_services() {{
     is_tunnel_running && disable_internet
 
-    # Stop Live Reload first (it depends on Nginx being alive for reload)
     if live_is_running; then
         live_stop quiet
     else
-        # Ensure the sub_filter include stays empty
         live_write_conf_disabled
     fi
 
@@ -2226,30 +2208,42 @@ while true; do
     fi
 
     if [ "$SERVER_RUNNING" -eq 1 ]; then
+        # Dynamic labels for options 2 and 3
+        if live_is_running; then
+            LIVE_LABEL="Disable Live Reload     (auto-refresh)"
+        else
+            LIVE_LABEL="Enable Live Reload      (auto-refresh)"
+        fi
+        if is_tunnel_running; then
+            NET_LABEL="Disable Internet        (disable internet access)"
+        else
+            NET_LABEL="Enable Internet         (enable internet access)"
+        fi
+
         echo -e "\033[1;33mSelect an option:\033[0m"
-        echo -e "\033[1;33m 1) stop             (Stop all services)\033[0m"
-        is_tunnel_running && echo -e "\033[1;33m 2) Disable Internet (disable internet access)\033[0m" || echo -e "\033[1;33m 2) Enable Internet  (enable internet access)\033[0m"
-        echo -e "\033[1;33m 3) restart          (Restart all services)\033[0m"
-        echo -e "\033[1;33m 4) quickstart       (Install WP / Laravel / Nextcloud)\033[0m"
-        echo -e "\033[1;33m 5) refresh status   (Re-check server status)\033[0m"
-        echo -e "\033[1;33m 6) update           (Check and apply updates)\033[0m"
-        echo -e "\033[1;33m 7) reinstall        (To fix issues — keeps DBs+htdocs)\033[0m"
-        echo -e "\033[1;33m 8) uninstall        (Remove server + DBs + htdocs)\033[0m"
-        echo -e "\033[1;33m 9) exit             (Exit & Stop Server)\033[0m"
-        live_is_running && echo -e "\033[1;33m10) Live Reload      (Disable auto-refresh)\033[0m" || echo -e "\033[1;33m10) Live Reload      (Enable auto-refresh)\033[0m"
+        echo -e "\033[1;33m 1) stop                (Stop all services)\033[0m"
+        echo -e "\033[1;33m 2) $LIVE_LABEL\033[0m"
+        echo -e "\033[1;33m 3) $NET_LABEL\033[0m"
+        echo -e "\033[1;33m 4) restart             (Restart all services)\033[0m"
+        echo -e "\033[1;33m 5) quickstart          (Install WP / Laravel / Nextcloud)\033[0m"
+        echo -e "\033[1;33m 6) refresh status      (Re-check server status)\033[0m"
+        echo -e "\033[1;33m 7) update              (Check and apply updates)\033[0m"
+        echo -e "\033[1;33m 8) reinstall           (To fix issues — keeps DBs+htdocs)\033[0m"
+        echo -e "\033[1;33m 9) uninstall           (Remove server + DBs + htdocs)\033[0m"
+        echo -e "\033[1;33m10) exit                (Exit & Stop Server)\033[0m"
         echo ""
         read -p $'\033[1;33mEnter choice [1-10]: \033[0m' choice
         case "$choice" in
             1|stop) stop_services ;;
-            2) is_tunnel_running && disable_internet || enable_internet ;;
-            3|restart) restart_services ;;
-            4|quickstart) quickstart_menu ;;
-            5|refresh) continue ;;
-            6|update) update_server manual ;;
-            7|reinstall) reinstall_server ;;
-            8|uninstall|delete) uninstall_server ;;
-            9|exit) stop_services; echo -e "\033[1;32mServer stopped.\033[0m"; exit 0 ;;
-            10|live|live-toggle) live_toggle ;;
+            2|live|live-toggle) live_toggle ;;
+            3) is_tunnel_running && disable_internet || enable_internet ;;
+            4|restart) restart_services ;;
+            5|quickstart) quickstart_menu ;;
+            6|refresh) continue ;;
+            7|update) update_server manual ;;
+            8|reinstall) reinstall_server ;;
+            9|uninstall|delete) uninstall_server ;;
+            10|exit) stop_services; echo -e "\033[1;32mServer stopped.\033[0m"; exit 0 ;;
             *) echo -e "\033[1;31mInvalid.\033[0m"; sleep 1 ;;
         esac
     else
