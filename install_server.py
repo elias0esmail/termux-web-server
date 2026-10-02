@@ -10,8 +10,12 @@ import secrets
 import getpass
 from pathlib import Path
 
-CURRENT_VERSION = "2.19.8"
+CURRENT_VERSION = "2.20.0"
 CHANGELOG = [
+    "New: Live Reload — auto-refresh browser on file changes (opt-in)",
+    "New: myserver live-start / live-stop / live-restart / live-status",
+    "New: Menu option #10 to toggle Live Reload",
+    "New: Live Reload stops with `myserver stop` (manual restart required)",
     "Fix: stop_services now reliably kills Nginx/Redis/PHP-FPM (3-stage termination)",
     "Fix: Do not delete MariaDB socket while server is running",
     "Fix: Preserve executable bit on htdocs files",
@@ -22,6 +26,7 @@ CHANGELOG = [
     "Fix: Safer pkill patterns (no more killing unrelated procs)",
     "Fix: getpass failures no longer silently disable password",
     "Fix: php_extension_dir detection order corrected",
+    "Fix: Nginx now serves index.html when index.php is absent",
     "New: mysqli/pdo_mysql default_socket set in php.ini",
     "New: Port-in-use warnings before starting services",
     "Polish: ASCII banner typo fixed, auto-update sleep shortened",
@@ -45,6 +50,12 @@ MY_CNF_FILE = HOME / ".my.cnf"
 MYSQL_DATA_DIR = PREFIX / "var/lib/mysql"
 MYSQL_RUN_DIR = PREFIX / "var/run/mysqld"
 MARIADB_SOCKET = MYSQL_RUN_DIR / "mysqld.sock"
+
+LIVE_PORT = 35730
+LIVE_PID_FILE = TMP_DIR / "myserver-live.pid"
+LIVE_LOG_FILE = TMP_DIR / "myserver-live.log"
+LIVE_CONF_FILE = NGINX_DIR / "live-reload.conf"
+LIVE_BIN_PATH = PREFIX / "bin/myserver-live"
 
 GITHUB_RAW_URL = "https://raw.githubusercontent.com/elias0esmail/termux-web-server/main"
 
@@ -191,11 +202,6 @@ def ask_web_root_location() -> Path:
 
 
 def ask_db_password() -> str:
-    """
-    Prompt for MariaDB root password. Empty = no password.
-    On mismatch, show error and re-prompt indefinitely
-    (until the user enters matching passwords or presses Ctrl+C to abort).
-    """
     print("\033[1;36m[i] MariaDB root password\033[0m")
     print("\033[1;33m    Leave empty and press Enter for NO password (default)\033[0m")
 
@@ -234,7 +240,6 @@ def _sql_escape(s: str) -> str:
 
 
 def _cnf_escape(s: str) -> str:
-    """Escape a value for a my.cnf double-quoted field."""
     return s.replace("\\", "\\\\").replace('"', '\\"')
 
 
@@ -251,7 +256,6 @@ def write_my_cnf(password: str, sock_path: Path):
 
 
 def read_password_from_my_cnf() -> str:
-    """Robust reader: only looks in the [client] section, handles escapes."""
     if not MY_CNF_FILE.exists():
         return ""
     try:
@@ -310,7 +314,6 @@ def php_loaded_extensions() -> set:
 
 
 def php_extension_dir() -> Path:
-    # Try WITHOUT -n first (ini can set extension_dir correctly)
     for extra_args in ([], ["-n"]):
         try:
             r = subprocess.run(
@@ -324,7 +327,6 @@ def php_extension_dir() -> Path:
                         return p
         except Exception:
             continue
-    # Fallback: parse php -i
     try:
         r = subprocess.run(["php", "-i"], capture_output=True, text=True, timeout=10)
         if r.returncode == 0:
@@ -392,7 +394,6 @@ def enforce_htdocs_permissions() -> int:
                 p = os.path.join(root, f)
                 try:
                     mode = os.stat(p).st_mode & 0o777
-                    # Preserve executables (scripts, binaries); normalize the rest
                     if mode & 0o111:
                         target = 0o755
                     else:
@@ -463,11 +464,9 @@ def start_mariadb_background():
     MYSQL_DATA_DIR.mkdir(parents=True, exist_ok=True)
     MYSQL_RUN_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Already running? Nothing to do.
     if mariadb_is_running():
         return True
 
-    # Only remove stale socket — never while server is running
     if MARIADB_SOCKET.exists():
         try:
             MARIADB_SOCKET.unlink()
@@ -491,7 +490,6 @@ def stop_mariadb_cleanly():
     if MARIADB_SOCKET.exists():
         run_cmd(f"{mysql_admin()} --socket='{MARIADB_SOCKET}' shutdown")
         time.sleep(2)
-    # Use -x (exact comm match) to avoid killing unrelated processes
     for name in ("mariadbd-safe", "mysqld_safe"):
         run_cmd(f"pkill -TERM -x {name}")
     time.sleep(1)
@@ -596,7 +594,6 @@ def setup_mariadb():
         cli = mysql_client()
 
         if MARIADB_SOCKET.exists():
-            # Modern MariaDB: mysql.user / mysql.db are views → use DROP USER
             sec_sql = (
                 "DROP USER IF EXISTS ''@'localhost';"
                 "DROP USER IF EXISTS ''@'%';"
@@ -756,6 +753,14 @@ def setup_nginx():
         cert_path = SSL_DIR / "server.crt"
         key_path = SSL_DIR / "server.key"
 
+        # Ensure live-reload.conf exists (empty = disabled). Nginx requires the
+        # file to exist because we `include` it unconditionally.
+        try:
+            if not LIVE_CONF_FILE.exists():
+                LIVE_CONF_FILE.write_text("")
+        except Exception:
+            pass
+
         common = f"""\
         location ~ ^/phpmyadmin/.*\\.php$ {{
             try_files $uri =404;
@@ -765,7 +770,6 @@ def setup_nginx():
             fastcgi_read_timeout 300;
         }}
 
-        
         location ~ ^(.*)/$ {{
             try_files $1/index.php @html_dir;
             include fastcgi_params;
@@ -785,10 +789,33 @@ def setup_nginx():
             fastcgi_pass php_fpm;
             fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
             fastcgi_read_timeout 300;
+            include {LIVE_CONF_FILE};
         }}
 
         location / {{
             try_files $uri /index.php?$args;
+            include {LIVE_CONF_FILE};
+        }}
+
+        location = /__live.js {{
+            proxy_pass http://127.0.0.1:{LIVE_PORT}/__live.js;
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_cache off;
+            add_header Cache-Control "no-store, no-cache, must-revalidate";
+        }}
+
+        location ~ ^/__live/ {{
+            proxy_pass http://127.0.0.1:{LIVE_PORT};
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header Connection '';
+            proxy_buffering off;
+            proxy_cache off;
+            proxy_read_timeout 24h;
+            chunked_transfer_encoding off;
         }}
 
         location ~ /\\. {{
@@ -805,6 +832,10 @@ http {{
     default_type application/octet-stream;
     sendfile on;
     keepalive_timeout 65;
+
+    # ---- Live Reload support (sub_filter) ----
+    sub_filter_once on;
+    sub_filter_types text/html;
 
     access_log {PREFIX}/var/log/nginx-access.log;
     error_log  {PREFIX}/var/log/nginx-error.log;
@@ -852,7 +883,7 @@ http {{
 """
         conf_path.write_text(nginx_config)
         (PREFIX / "var/log").mkdir(parents=True, exist_ok=True)
-        print("\033[1;32m [✓] Nginx configured. \033[0m")
+        print("\033[1;32m [✓] Nginx configured (Live Reload ready). \033[0m")
         return True
     except Exception as e:
         print(f"\033[1;31m [!] Nginx config error: {e}\033[0m")
@@ -1138,6 +1169,244 @@ def install_phpmyadmin():
 
 
 # ===========================================================================
+# Live Reload server (Python watcher + SSE)
+# ===========================================================================
+LIVE_SERVER_SCRIPT = r'''#!/data/data/com.termux/files/usr/bin/python3
+"""
+myserver-live — Live Reload helper for Termux Web Server.
+
+Usage:
+    myserver-live <htdocs_dir> <port> <pid_file> <log_file>
+
+Serves:
+    GET /__live.js    → JS client (EventSource to /__live/sse)
+    GET /__live/sse   → SSE stream (broadcasts "reload" on file change)
+
+Watches:
+    <htdocs_dir> via polling (works on Android FUSE-mounted dirs).
+"""
+import os
+import sys
+import time
+import threading
+from pathlib import Path
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+HTDOCS_DIR = Path(sys.argv[1]) if len(sys.argv) > 1 else Path.home() / "htdocs"
+PORT       = int(sys.argv[2]) if len(sys.argv) > 2 else 35730
+PID_FILE   = Path(sys.argv[3]) if len(sys.argv) > 3 else Path("/tmp/myserver-live.pid")
+LOG_FILE   = Path(sys.argv[4]) if len(sys.argv) > 4 else Path("/tmp/myserver-live.log")
+
+IGNORE_DIRS = {".git", "node_modules", "vendor", "cache", ".cache",
+               "__pycache__", ".idea", ".vscode"}
+IGNORE_EXTS = {".log", ".tmp", ".swp", ".swo", ".lock", ".pid"}
+
+_clients = []
+_clients_lock = threading.Lock()
+
+JS_PAYLOAD = (
+    "/* myserver live-reload client */\n"
+    "(function(){\n"
+    "  if (window.__myserverLiveLoaded) return;\n"
+    "  window.__myserverLiveLoaded = true;\n"
+    "  try {\n"
+    "    var es = new EventSource('/__live/sse');\n"
+    "    es.addEventListener('reload', function(){ location.reload(); });\n"
+    "    es.onerror = function(){\n"
+    "      try { es.close(); } catch(e) {}\n"
+    "      setTimeout(function(){ window.__myserverLiveLoaded = false; location.reload(); }, 3000);\n"
+    "    };\n"
+    "  } catch(e) { /* EventSource unsupported */ }\n"
+    "})();\n"
+)
+
+
+def log(msg: str):
+    try:
+        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(LOG_FILE, "a") as f:
+            f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
+    except Exception:
+        pass
+
+
+def scan_mtimes():
+    result = {}
+    try:
+        for root, dirs, files in os.walk(HTDOCS_DIR):
+            dirs[:] = [d for d in dirs
+                       if d not in IGNORE_DIRS and not d.startswith(".")]
+            for f in files:
+                ext = os.path.splitext(f)[1].lower()
+                if ext in IGNORE_EXTS:
+                    continue
+                p = os.path.join(root, f)
+                try:
+                    result[p] = os.stat(p).st_mtime_ns
+                except Exception:
+                    pass
+    except Exception as e:
+        log(f"scan error: {e}")
+    return result
+
+
+def broadcast():
+    msg = b"event: reload\ndata: change\n\n"
+    with _clients_lock:
+        dead = []
+        for w in _clients:
+            try:
+                w.write(msg)
+                w.flush()
+            except Exception:
+                dead.append(w)
+        for w in dead:
+            try:
+                _clients.remove(w)
+            except Exception:
+                pass
+    if dead:
+        log(f"removed {len(dead)} dead client(s)")
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, fmt, *args):
+        pass
+
+    def do_GET(self):
+        path = self.path.split("?", 1)[0]
+
+        if path == "/__live/sse":
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+                self.send_header("Connection", "keep-alive")
+                self.send_header("X-Accel-Buffering", "no")
+                self.end_headers()
+                self.wfile.write(b": connected\n\n")
+                self.wfile.flush()
+            except Exception:
+                return
+
+            with _clients_lock:
+                _clients.append(self.wfile)
+            log(f"client connected ({len(_clients)} total)")
+            try:
+                while True:
+                    time.sleep(15)
+                    self.wfile.write(b": ping\n\n")
+                    self.wfile.flush()
+            except Exception:
+                pass
+            finally:
+                with _clients_lock:
+                    if self.wfile in _clients:
+                        _clients.remove(self.wfile)
+                log(f"client disconnected ({len(_clients)} left)")
+            return
+
+        if path == "/__live.js":
+            body = JS_PAYLOAD.encode("utf-8")
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", "application/javascript; charset=utf-8")
+                self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception:
+                pass
+            return
+
+        if path == "/__live/health":
+            body = b"ok\n"
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception:
+                pass
+            return
+
+        self.send_response(404)
+        self.end_headers()
+
+
+def main():
+    if not HTDOCS_DIR.exists():
+        log(f"FATAL: htdocs dir not found: {HTDOCS_DIR}")
+        print(f"htdocs dir not found: {HTDOCS_DIR}", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+        PID_FILE.write_text(str(os.getpid()))
+    except Exception as e:
+        log(f"could not write pid file: {e}")
+
+    try:
+        server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+        server.daemon_threads = True
+    except OSError as e:
+        log(f"FATAL: cannot bind port {PORT}: {e}")
+        print(f"cannot bind port {PORT}: {e}", file=sys.stderr)
+        sys.exit(2)
+
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    log(f"started: htdocs={HTDOCS_DIR} port={PORT} pid={os.getpid()}")
+
+    last = scan_mtimes()
+    log(f"initial scan: {len(last)} file(s)")
+
+    while True:
+        time.sleep(1.0)
+        cur = scan_mtimes()
+        if cur != last:
+            changed = 0
+            for k in set(cur.keys()) | set(last.keys()):
+                if cur.get(k) != last.get(k):
+                    changed += 1
+            log(f"change detected ({changed} file(s)) — broadcasting")
+            broadcast()
+            last = cur
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        log("interrupted")
+    except Exception as e:
+        log(f"FATAL: {e}")
+    finally:
+        try:
+            PID_FILE.unlink()
+        except Exception:
+            pass
+'''
+
+
+def create_live_server_script() -> bool:
+    try:
+        LIVE_BIN_PATH.write_text(LIVE_SERVER_SCRIPT, encoding='utf-8')
+        LIVE_BIN_PATH.chmod(0o755)
+        # Ensure the include file exists (empty = disabled)
+        try:
+            if not LIVE_CONF_FILE.exists():
+                LIVE_CONF_FILE.write_text("")
+        except Exception:
+            pass
+        print("\033[1;32m [✓] Live Reload server installed. \033[0m")
+        return True
+    except Exception as e:
+        print(f"\033[1;31m [!] Live Reload install error: {e}\033[0m")
+        return False
+
+
+# ===========================================================================
 # CLI generator
 # ===========================================================================
 def create_myserver_cli():
@@ -1158,6 +1427,12 @@ TUNNEL_PID_FILE="$PREFIX/tmp/cloudflared.pid"
 TUNNEL_URL_FILE="$PREFIX/tmp/cloudflared.url"
 TUNNEL_LOG="$PREFIX/tmp/cloudflared.log"
 MARIADB_SOCKET="$MYSQL_RUN_DIR/mysqld.sock"
+
+LIVE_PORT={LIVE_PORT}
+LIVE_PID_FILE="{LIVE_PID_FILE}"
+LIVE_LOG_FILE="{LIVE_LOG_FILE}"
+LIVE_CONF_FILE="{LIVE_CONF_FILE}"
+LIVE_BIN="{LIVE_BIN_PATH}"
 
 # If web root was overridden via file, prefer that
 if [ -f "$HTDOCS_PATH_FILE" ]; then
@@ -1212,9 +1487,131 @@ mariadb_is_running() {{
     pgrep -x mariadbd-safe > /dev/null || pgrep -x mysqld_safe > /dev/null
 }}
 
+# ============ LIVE RELOAD ============
+live_is_running() {{
+    if [ -f "$LIVE_PID_FILE" ]; then
+        LPID=$(cat "$LIVE_PID_FILE" 2>/dev/null)
+        if [ -n "$LPID" ] && kill -0 "$LPID" 2>/dev/null; then return 0; fi
+    fi
+    pgrep -f "myserver-live" > /dev/null && return 0
+    return 1
+}}
+
+live_write_conf_enabled() {{
+    cat > "$LIVE_CONF_FILE" <<'LVEOF'
+sub_filter '</body>' '<script src="/__live.js"></script></body>';
+sub_filter_once on;
+sub_filter_types text/html;
+LVEOF
+}}
+
+live_write_conf_disabled() {{
+    : > "$LIVE_CONF_FILE"
+}}
+
+live_reload_nginx() {{
+    if pgrep -f nginx > /dev/null; then
+        nginx -s reload > /dev/null 2>&1
+    fi
+}}
+
+live_start() {{
+    if ! server_is_running; then
+        echo -e "\033[1;31m[!] Server is not running — start it first.\033[0m"
+        sleep 2
+        return 1
+    fi
+    if live_is_running; then
+        echo -e "\033[1;33m[i] Live Reload already running.\033[0m"
+        sleep 1
+        return 0
+    fi
+    if [ ! -x "$LIVE_BIN" ]; then
+        echo -e "\033[1;31m[!] Live server binary not found: $LIVE_BIN\033[0m"
+        sleep 2
+        return 1
+    fi
+    if port_in_use $LIVE_PORT; then
+        echo -e "\033[1;31m[!] Port $LIVE_PORT is already in use.\033[0m"
+        sleep 2
+        return 1
+    fi
+    echo -e "\033[1;34m[*] Starting Live Reload on port $LIVE_PORT...\033[0m"
+    rm -f "$LIVE_PID_FILE" "$LIVE_LOG_FILE"
+    nohup "$LIVE_BIN" "$HTDOCS_DIR" "$LIVE_PORT" "$LIVE_PID_FILE" "$LIVE_LOG_FILE" \
+        > /dev/null 2>&1 &
+    # wait for pid file (max 5s)
+    i=0
+    while [ $i -lt 5 ]; do
+        sleep 1
+        i=$((i+1))
+        if live_is_running; then break; fi
+    done
+    if ! live_is_running; then
+        echo -e "\033[1;31m[!] Failed to start Live Reload. Check: $LIVE_LOG_FILE\033[0m"
+        sleep 2
+        return 1
+    fi
+    live_write_conf_enabled
+    live_reload_nginx
+    echo -e "\033[1;32m[OK] Live Reload enabled (auto-refresh on save).\033[0m"
+    echo -e "\033[1;36m    Watching: $HTDOCS_DIR\033[0m"
+    sleep 2
+}}
+
+live_stop() {{
+    local quiet="$1"
+    if ! live_is_running; then
+        # still ensure the conf is cleared
+        live_write_conf_disabled
+        live_reload_nginx
+        [ "$quiet" != "quiet" ] && echo -e "\033[1;33m[i] Live Reload already stopped.\033[0m"
+        return 0
+    fi
+    [ "$quiet" != "quiet" ] && echo -e "\033[1;33m[*] Stopping Live Reload...\033[0m"
+    if [ -f "$LIVE_PID_FILE" ]; then
+        LPID=$(cat "$LIVE_PID_FILE" 2>/dev/null)
+        [ -n "$LPID" ] && kill "$LPID" 2>/dev/null
+    fi
+    sleep 1
+    if live_is_running; then
+        pkill -f "myserver-live" > /dev/null 2>&1
+        sleep 1
+    fi
+    rm -f "$LIVE_PID_FILE"
+    live_write_conf_disabled
+    live_reload_nginx
+    [ "$quiet" != "quiet" ] && echo -e "\033[1;31m[OK] Live Reload disabled.\033[0m"
+    [ "$quiet" != "quiet" ] && sleep 1
+}}
+
+live_restart() {{
+    live_stop quiet
+    sleep 1
+    live_start
+}}
+
+live_status() {{
+    if live_is_running; then
+        echo -e "\033[1;32mLive Reload: RUNNING (port $LIVE_PORT)\033[0m"
+        echo -e "\033[1;36mWatching   : $HTDOCS_DIR\033[0m"
+        echo -e "\033[1;36mLog        : $LIVE_LOG_FILE\033[0m"
+    else
+        echo -e "\033[1;31mLive Reload: STOPPED\033[0m"
+    fi
+}}
+
+live_toggle() {{
+    if live_is_running; then
+        live_stop
+    else
+        live_start
+    fi
+}}
+# =====================================
+
 start_mariadb_background() {{
     mkdir -p "$MYSQL_DATA_DIR" "$MYSQL_RUN_DIR"
-    # Don't touch the socket if server is already running
     if mariadb_is_running; then
         return 0
     fi
@@ -1275,7 +1672,6 @@ check_webroot() {{
     if [ ! -r "$HTDOCS_DIR" ] || [ ! -x "$HTDOCS_DIR" ]; then
         chmod 755 "$HTDOCS_DIR" 2>/dev/null
         find "$HTDOCS_DIR" -type d -exec chmod 755 {{}} \; 2>/dev/null
-        # Preserve executables
         find "$HTDOCS_DIR" -type f -perm -u+x -exec chmod 755 {{}} \; 2>/dev/null
         find "$HTDOCS_DIR" -type f ! -perm -u+x -exec chmod 644 {{}} \; 2>/dev/null
     fi
@@ -1317,11 +1713,12 @@ show_banner_and_status() {{
     echo -e "\033[1;33m================================================\033[0m\n"
 
     echo -e "\033[1;35m============= [ SERVICES STATUS ] =============\033[0m"
-    pgrep -f nginx > /dev/null && echo -e " Nginx:    \033[1;32mRunning [OK]\033[0m" || echo -e " Nginx:    \033[1;31mStopped [X]\033[0m"
-    pgrep -f php-fpm > /dev/null && echo -e " PHP-FPM:  \033[1;32mRunning [OK]\033[0m" || echo -e " PHP-FPM:  \033[1;31mStopped [X]\033[0m"
-    pgrep -f "mariadb|mysqld" > /dev/null && echo -e " MariaDB:  \033[1;32mRunning [OK]\033[0m" || echo -e " MariaDB:  \033[1;31mStopped [X]\033[0m"
-    pgrep -f redis-server > /dev/null && echo -e " Redis:    \033[1;32mRunning [OK]\033[0m" || echo -e " Redis:    \033[1;31mStopped [X]\033[0m"
-    is_tunnel_running && echo -e " Tunnel:   \033[1;32mRunning [OK]\033[0m" || echo -e " Tunnel:   \033[1;31mStopped [X]\033[0m"
+    pgrep -f nginx > /dev/null && echo -e " Nginx:      \033[1;32mRunning [OK]\033[0m" || echo -e " Nginx:      \033[1;31mStopped [X]\033[0m"
+    pgrep -f php-fpm > /dev/null && echo -e " PHP-FPM:    \033[1;32mRunning [OK]\033[0m" || echo -e " PHP-FPM:    \033[1;31mStopped [X]\033[0m"
+    pgrep -f "mariadb|mysqld" > /dev/null && echo -e " MariaDB:    \033[1;32mRunning [OK]\033[0m" || echo -e " MariaDB:    \033[1;31mStopped [X]\033[0m"
+    pgrep -f redis-server > /dev/null && echo -e " Redis:      \033[1;32mRunning [OK]\033[0m" || echo -e " Redis:      \033[1;31mStopped [X]\033[0m"
+    is_tunnel_running && echo -e " Tunnel:     \033[1;32mRunning [OK]\033[0m" || echo -e " Tunnel:     \033[1;31mStopped [X]\033[0m"
+    live_is_running && echo -e " Live Reload:\033[1;32mRunning [OK]\033[0m (port $LIVE_PORT)" || echo -e " Live Reload:\033[1;31mStopped [X]\033[0m"
     echo -e "\033[1;35m===============================================\033[0m\n"
 
     SVC_INFO=0
@@ -1386,6 +1783,7 @@ start_services() {{
 
     sleep 1.5
     echo -e "\033[1;32m[OK] Services started successfully.\033[0m"
+    echo -e "\033[1;33m[*] Tip: enable Live Reload with 'myserver live-start'.\033[0m"
     echo -e "\033[1;33m[*] Opening http://localhost:8080 in browser...\033[0m"
     open_browser
     sleep 1
@@ -1393,12 +1791,19 @@ start_services() {{
 
 stop_services() {{
     is_tunnel_running && disable_internet
+
+    # Stop Live Reload first (it depends on Nginx being alive for reload)
+    if live_is_running; then
+        live_stop quiet
+    else
+        # Ensure the sub_filter include stays empty
+        live_write_conf_disabled
+    fi
+
     echo -e "\033[1;33m[*] Stopping all services (graceful)...\033[0m"
 
-    # --- MariaDB: shutdown via admin, then TERM, then KILL ---
     stop_mariadb_cleanly
 
-    # --- Nginx: graceful (-s stop) → TERM → KILL ---
     if pgrep -f nginx > /dev/null; then
         echo -e "\033[1;36m    - Stopping Nginx...\033[0m"
         nginx -s stop > /dev/null 2>&1
@@ -1413,7 +1818,6 @@ stop_services() {{
         fi
     fi
 
-    # --- PHP-FPM: TERM → KILL ---
     if pgrep -f php-fpm > /dev/null; then
         echo -e "\033[1;36m    - Stopping PHP-FPM...\033[0m"
         pkill -TERM -f php-fpm > /dev/null 2>&1
@@ -1424,7 +1828,6 @@ stop_services() {{
         fi
     fi
 
-    # --- Redis: redis-cli shutdown → TERM → KILL ---
     if pgrep -f redis-server > /dev/null; then
         echo -e "\033[1;36m    - Stopping Redis...\033[0m"
         redis-cli -h 127.0.0.1 -p 6379 shutdown nosave > /dev/null 2>&1
@@ -1439,12 +1842,12 @@ stop_services() {{
         fi
     fi
 
-    # --- Final verification ---
     local left=0
     pgrep -f nginx > /dev/null && {{ echo -e "\033[1;31m[!] Nginx still running!\033[0m"; left=1; }}
     pgrep -f php-fpm > /dev/null && {{ echo -e "\033[1;31m[!] PHP-FPM still running!\033[0m"; left=1; }}
     pgrep -f redis-server > /dev/null && {{ echo -e "\033[1;31m[!] Redis still running!\033[0m"; left=1; }}
     pgrep -x mariadbd > /dev/null && {{ echo -e "\033[1;31m[!] MariaDB still running!\033[0m"; left=1; }}
+    live_is_running && {{ echo -e "\033[1;31m[!] Live Reload still running!\033[0m"; left=1; }}
 
     if [ $left -eq 0 ]; then
         echo -e "\033[1;32m[OK] All services stopped safely.\033[0m"
@@ -1730,7 +2133,7 @@ uninstall_server() {{
     echo -e "   \033[1;31m✗\033[0m \033[1;31mALL user databases\033[0m (WordPress, Nextcloud, Laravel, ...)"
     echo -e "   \033[1;31m✗\033[0m The MariaDB data directory"
     echo -e "   \033[1;31m✗\033[0m The web root: \033[1;33m$HTDOCS_DIR\033[0m (including ALL contents)"
-    echo -e "   \033[1;31m✗\033[0m ~/.my.cnf and the myserver CLI"
+    echo -e "   \033[1;31m✗\033[0m ~/.my.cnf, the myserver CLI, and Live Reload helper"
     echo ""
     read -p $'\033[1;31mAre you sure? Type "yes" to confirm: \033[0m' confirm
     case "$confirm" in
@@ -1755,9 +2158,11 @@ uninstall_server() {{
             echo -e "\033[1;33m[*] Removing configuration files...\033[0m"
             rm -rf "$PREFIX/etc/nginx/ssl"
             rm -f "$PREFIX/etc/nginx/nginx.conf"
+            rm -f "$LIVE_CONF_FILE"
             rm -f "$PREFIX/etc/php-fpm.d/www.conf"
             rm -f "$VERSION_FILE"
             rm -f "$TUNNEL_PID_FILE" "$TUNNEL_URL_FILE" "$TUNNEL_LOG"
+            rm -f "$LIVE_PID_FILE" "$LIVE_LOG_FILE"
             rm -f "$HTDOCS_PATH_FILE"
             rm -f "$HOME/.my.cnf"
 
@@ -1775,6 +2180,7 @@ uninstall_server() {{
             echo -e "\033[1;32m[OK] Web root deleted.\033[0m"
 
             rm -f "$PREFIX/bin/myserver"
+            rm -f "$LIVE_BIN"
             echo ""
             echo -e "\033[1;32m[✓] Uninstalled completely.\033[0m"
             exit 0
@@ -1794,8 +2200,13 @@ if [ -n "$1" ]; then
         reinstall) reinstall_server ;;
         internet-enable|enable-internet) enable_internet ;;
         internet-disable|disable-internet) disable_internet ;;
+        live-start|live-enable) live_start ;;
+        live-stop|live-disable) live_stop ;;
+        live-restart) live_restart ;;
+        live-status) live_status ;;
+        live-toggle) live_toggle ;;
         delete|uninstall) uninstall_server ;;
-        *) echo "Usage: myserver [start|stop|restart|status|quickstart|update|reinstall|internet-enable|internet-disable|uninstall]" ;;
+        *) echo "Usage: myserver [start|stop|restart|status|quickstart|update|reinstall|internet-enable|internet-disable|live-start|live-stop|live-restart|live-status|live-toggle|uninstall]" ;;
     esac
     exit 0
 fi
@@ -1825,8 +2236,9 @@ while true; do
         echo -e "\033[1;33m 7) reinstall        (To fix issues — keeps DBs+htdocs)\033[0m"
         echo -e "\033[1;33m 8) uninstall        (Remove server + DBs + htdocs)\033[0m"
         echo -e "\033[1;33m 9) exit             (Exit & Stop Server)\033[0m"
+        live_is_running && echo -e "\033[1;33m10) Live Reload      (Disable auto-refresh)\033[0m" || echo -e "\033[1;33m10) Live Reload      (Enable auto-refresh)\033[0m"
         echo ""
-        read -p $'\033[1;33mEnter choice [1-9]: \033[0m' choice
+        read -p $'\033[1;33mEnter choice [1-10]: \033[0m' choice
         case "$choice" in
             1|stop) stop_services ;;
             2) is_tunnel_running && disable_internet || enable_internet ;;
@@ -1837,6 +2249,7 @@ while true; do
             7|reinstall) reinstall_server ;;
             8|uninstall|delete) uninstall_server ;;
             9|exit) stop_services; echo -e "\033[1;32mServer stopped.\033[0m"; exit 0 ;;
+            10|live|live-toggle) live_toggle ;;
             *) echo -e "\033[1;31mInvalid.\033[0m"; sleep 1 ;;
         esac
     else
@@ -1864,7 +2277,6 @@ done
     try:
         bin_path.write_text(script_content, encoding='utf-8')
         bin_path.chmod(0o755)
-        # Only mark version after CLI written successfully
         VERSION_FILE.write_text(CURRENT_VERSION)
         print("\033[1;32m [✓] CLI Tool 'myserver' configured. \033[0m")
         return True
@@ -1891,7 +2303,6 @@ def cleanup_repository():
                                     capture_output=True, text=True, timeout=5)
             if "elias0esmail/termux-web-server" not in result.stdout:
                 return
-            # Refuse to delete if there are uncommitted changes
             st = subprocess.run(["git", "-C", str(cwd), "status", "--porcelain"],
                                 capture_output=True, text=True, timeout=5)
             if st.stdout.strip():
@@ -1987,6 +2398,7 @@ def main():
             ("PHP Configuration & Sessions Fix", create_php_ini),
             ("Web Root Setup", setup_htdocs),
             ("phpMyAdmin Installation", install_phpmyadmin),
+            ("Live Reload Server", create_live_server_script),
             ("CLI Configuration", create_myserver_cli),
         ]
 
@@ -2021,7 +2433,8 @@ def main():
         print("HTTP URL:  http://localhost:8080")
         print("HTTPS URL: https://localhost:8443")
         print("phpMyAdmin: http://localhost:8080/phpmyadmin")
-        print("\n\033[1;35mType 'myserver' anytime to open the interactive manager.\033[0m\n")
+        print("\n\033[1;35mType 'myserver' anytime to open the interactive manager.\033[0m")
+        print("\033[1;36mEnable Live Reload: myserver live-start\033[0m\n")
 
         cleanup_repository()
 
