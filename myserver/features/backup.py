@@ -293,6 +293,10 @@ def restore(archive_path: str, force: bool = False) -> bool:
 
     ui.step(f"Verifying archive: {src.name}")
     tmp = Path(tempfile.mkdtemp(prefix="myserver-restore-"))
+
+    # import once at the top of restore so we can use it in except/finally
+    from ..cli import services_ctl
+
     try:
         with tarfile.open(src, "r:gz") as tar:
             def _safe(member, dest):
@@ -339,7 +343,6 @@ def restore(archive_path: str, force: bool = False) -> bool:
             ui.warn("Safety backup failed — continuing anyway.")
 
         # ---- stop services ----
-        from ..cli import services_ctl
         services_ctl.stop_all(quiet=True)
 
         # ---- htdocs ----
@@ -443,11 +446,28 @@ def restore(archive_path: str, force: bool = False) -> bool:
             except Exception as e:
                 ui.warn(f"phpMyAdmin reinstall error: {e}")
 
-        ui.ok("Restore complete. Start the server with: myserver start")
+        # ---- stop services (return to clean idle state) ----
+        # MariaDB was started above for the SQL import; php-fpm/nginx may
+        # have been auto-started by reinstall_phpmyadmin's PHP calls.
+        # We deliberately return the system to "stopped" so the user
+        # starts services explicitly with `myserver start`.
+        ui.step("Stopping services (idle state after restore)...")
+        try:
+            services_ctl.stop_all(quiet=True)
+        except Exception as e:
+            ui.warn(f"Could not stop all services cleanly: {e}")
+
+        ui.ok("Restore complete. All services are stopped.")
+        ui.info("Start when ready:  myserver start")
         return True
 
     except Exception as e:
         ui.err(f"Restore failed: {e}")
+        # Try to leave services stopped even on failure
+        try:
+            services_ctl.stop_all(quiet=True)
+        except Exception:
+            pass
         return False
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
