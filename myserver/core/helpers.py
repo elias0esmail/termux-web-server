@@ -6,6 +6,7 @@ import signal
 import shutil
 import subprocess
 import time
+import socket
 from pathlib import Path
 
 from . import paths
@@ -192,21 +193,34 @@ def check_internet(timeout: int = 6) -> tuple[bool, str]:
 # ---------------------------------------------------------------------------
 # Ports
 # ---------------------------------------------------------------------------
-def port_in_use(port: int) -> bool:
-    for tool in ("ss", "netstat"):
-        if not command_exists(tool):
-            continue
-        try:
-            r = subprocess.run(
-                ["sh", "-c",
-                 f"{tool} -tln 2>/dev/null | awk '{{print $4}}' | grep -qE '[:.]{port}$'"],
-                timeout=5)
-            if r.returncode == 0:
-                return True
-        except Exception:
-            continue
-    return False
+def port_in_use(port: int, host: str = "127.0.0.1") -> bool:
+    """Check if a TCP port is currently bound/listening.
 
+    Uses Python sockets — reliable on Termux/Android where `ss` and
+    `netstat` are not installed by default.
+
+    Strategy:
+      1. Try to connect: if successful, something is listening.
+      2. Try to bind: if it fails, something is bound (even if not accepting).
+    """
+    import socket as _socket
+
+    # --- 1) try connecting ---
+    try:
+        with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
+            s.settimeout(0.4)
+            s.connect((host, port))
+            return True
+    except (_socket.timeout, ConnectionRefusedError, OSError):
+        pass
+
+    # --- 2) try to bind ---
+    try:
+        with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
+            s.bind((host, port))
+            return False
+    except OSError:
+        return True
 
 # ---------------------------------------------------------------------------
 # PHP
@@ -280,3 +294,10 @@ def read_version() -> str:
         return paths.VERSION_FILE.read_text().strip() or "0.0.0"
     except Exception:
         return "0.0.0"
+      
+def clear_screen():
+    """Clear terminal screen + scrollback (best-effort)."""
+    try:
+        print("\033[3J\033[2J\033[H", end="", flush=True)
+    except Exception:
+        pass

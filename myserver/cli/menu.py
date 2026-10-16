@@ -76,7 +76,7 @@ def menu(version: str) -> None:
     from .commands import cmd_reinstall, cmd_uninstall, cmd_update
 
     while True:
-        print("\033[2J\033[H", end="")
+        helpers.clear_screen()
         _render_banner(version)
         _render_status()
 
@@ -98,7 +98,7 @@ def menu(version: str) -> None:
                 print(f"{ui.C_YELLOW} 3) {tun_label}{ui.C_RESET}")
                 print(f"{ui.C_YELLOW} 4) restart               (Restart all services){ui.C_RESET}")
                 print(f"{ui.C_YELLOW} 5) quickstart            (Install WP/Laravel/Nextcloud){ui.C_RESET}")
-                print(f"{ui.C_YELLOW} 6) backup                (Snapshot -> ~/myserver-backups){ui.C_RESET}")
+                print(f"{ui.C_YELLOW} 6) backup                (Snapshot->~/myserver-backups){ui.C_RESET}")
                 print(f"{ui.C_YELLOW} 7) doctor                (Diagnose issues){ui.C_RESET}")
                 print(f"{ui.C_YELLOW} 8) logs                  (View service logs){ui.C_RESET}")
                 print(f"{ui.C_YELLOW} 9) ssl-info              (Certificate details){ui.C_RESET}")
@@ -146,9 +146,7 @@ def menu(version: str) -> None:
                 elif choice in ("2",  "refresh"): continue
                 elif choice in ("3",  "backup-list"): backup.list_cmd()
                 elif choice in ("4",  "restore"):
-                    path = _prompt("Archive path: ")
-                    if path:
-                        backup.restore(path)
+                    backup.choose_and_restore()
                 elif choice in ("5",  "doctor"):  doctor.run()
                 elif choice in ("6",  "ssl-info"): ssl.print_info()
                 elif choice in ("7",  "update"):  cmd_update(auto=False)

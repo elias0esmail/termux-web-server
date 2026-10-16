@@ -374,13 +374,17 @@ def main() -> int:
 
     # no args -> interactive menu
     if not args:
+        helpers.clear_screen()
         # skip auto-update unless explicitly opted in
         if os.environ.get("MYSERVER_SKIP_AUTOUPDATE") != "1" \
                 and os.environ.get("MYSERVER_AUTO_UPDATE") == "1":
             cmd_update(auto=True)
+            # update may have printed stuff — clear again before menu
+            helpers.clear_screen()
         version = helpers.read_version()
         menu.menu(version)
         return 0
+
 
     cmd = args[0].lower()
     rest = args[1:]
@@ -431,10 +435,9 @@ def main() -> int:
         backup.list_cmd(); return 0
     if cmd == "restore":
         if not rest:
-            ui.err("Usage: myserver restore <file.tar.gz>")
-            return 2
+        # no path given → interactive chooser
+          return 0 if backup.choose_and_restore() else 1
         return 0 if backup.restore(rest[0]) else 1
-
     # ---- diagnostics ----
     # ---- diagnostics ----
     if cmd == "doctor":

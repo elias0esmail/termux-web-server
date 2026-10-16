@@ -337,3 +337,53 @@ def delete(archive_path: str) -> bool:
     except Exception as e:
         ui.err(f"Delete failed: {e}")
         return False
+
+# ---------------------------------------------------------------------------
+def choose_and_restore() -> bool:
+    """Interactive restore: show backups via fzf (arrow keys), then restore."""
+    backups = list_backups()
+    if not backups:
+        ui.warn(f"No backups found in {paths.BACKUP_DIR}")
+        ui.info("Create one first:  myserver backup")
+        return False
+
+    # build human-readable option labels (index-aligned with `backups`)
+    options: list[str] = []
+    for b in backups:
+        try:
+            st = b.stat()
+            dt = datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M")
+            size = st.st_size / (1024 * 1024)
+            options.append(f"{dt}   {size:>7.2f} MB   {b.name}")
+        except Exception:
+            options.append(b.name)
+
+    options.append("── Enter path manually ──")
+    options.append("── Cancel ──")
+
+    idx = ui.choose_option(
+        "Select a backup to restore",
+        options,
+        default=0)          # newest backup is at index 0
+
+    # --- Cancel ---
+    if idx == len(options) - 1:
+        ui.info("Cancelled.")
+        return False
+
+    # --- Manual path ---
+    if idx == len(options) - 2:
+        try:
+            path = input(f"{ui.C_YELLOW}Archive path: {ui.C_RESET}").strip()
+        except (EOFError, KeyboardInterrupt):
+            return False
+        if not path:
+            ui.info("Cancelled.")
+            return False
+        return restore(path)
+
+    # --- Chosen backup ---
+    selected = backups[idx]
+    print()
+    ui.info(f"Selected: {selected.name}")
+    return restore(str(selected))
