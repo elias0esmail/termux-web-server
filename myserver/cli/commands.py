@@ -437,9 +437,9 @@ def main() -> int:
 
     # ---- diagnostics ----
     # ---- diagnostics ----
-if cmd == "doctor":
-    do_fix = any(a in ("--fix", "-f") for a in rest)
-    return doctor.run(fix=do_fix)
+    if cmd == "doctor":
+        do_fix = any(a in ("--fix", "-f") for a in rest)
+        return doctor.run(fix=do_fix)
     if cmd == "logs":
         which = rest[0] if rest else "nginx"
         return cmd_logs(which)
