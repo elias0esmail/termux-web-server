@@ -6,7 +6,9 @@ myserver is your own localhost server stack for Android. You can set up Nginx, P
 <p align="center">
 <img src="https://github.com/elias0esmail/termux-web-server/blob/main/Screenshot.jpg"/>
 </p>
-
+<p align="center">
+<img src="https://github.com/elias0esmail/termux-web-server/blob/main/Screenshot1.jpg"/>
+</p>
 <br/><br/><br/>
 
 # How to use ?

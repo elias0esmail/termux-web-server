@@ -2,10 +2,20 @@
 
 Archive layout:
     manifest.json
-    htdocs/...
-    mysql/all-databases.sql
-    ssl/{server.crt,server.key,custom.crt?,custom.key?}
+    htdocs/...                                  (user data + phpMyAdmin config)
+    mysql/all-databases.sql                     (user databases only)
+    ssl/{server.crt,server.key,custom.?}        (SSL certificates)
     config/{nginx.conf,www.conf,php.ini,my.cnf}
+
+Design notes:
+    * phpMyAdmin is treated as a *tool*, not user data. Its binary tree
+      (vendor/, libraries/, setup/, etc.) is excluded from backups to keep
+      archives small. Only htdocs/phpmyadmin/config.inc.php is preserved.
+      On restore, phpMyAdmin is reinstalled fresh from upstream, then the
+      saved config.inc.php is written back. This guarantees the latest
+      secure version after every restore.
+    * System databases (mysql, information_schema, ...) are excluded from
+      the dump so restores do not clobber server users.
 """
 from __future__ import annotations
 
@@ -24,6 +34,10 @@ from ..services import mariadb
 
 MANIFEST_VERSION = 1
 SYSTEM_DBS = ("mysql", "information_schema", "performance_schema", "sys")
+
+# phpMyAdmin paths (relative to htdocs)
+PMA_DIRNAME   = "phpmyadmin"
+PMA_KEEP_ONLY = {"config.inc.php"}   # ← only this file survives backup
 
 
 # ---------------------------------------------------------------------------
@@ -53,6 +67,42 @@ def _list_user_databases() -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+def _ignore_for_backup(dirpath: str, names: list[str]) -> set[str]:
+    """Custom ignore filter for `shutil.copytree`.
+
+    Rules:
+      * Skip junk everywhere: .git, node_modules, caches, temp dirs, *.log.
+      * Inside htdocs/phpmyadmin/: keep only config.inc.php, skip everything
+        else (vendor/, libraries/, setup/, tmp/, ... — will be reinstalled).
+    """
+    ignored: set[str] = set()
+
+    # --- junk across the tree ---
+    for n in names:
+        if n in (".git", "node_modules", "cache", ".cache",
+                 ".myserver-cache", "tmp", "temp"):
+            ignored.add(n)
+        elif n.endswith(".log"):
+            ignored.add(n)
+
+    # --- special handling for htdocs/phpmyadmin/ ---
+    try:
+        rel = os.path.relpath(dirpath, paths.HTDOCS_DIR)
+    except ValueError:
+        rel = ""
+
+    # Normalize to forward slashes and strip leading './'
+    rel = rel.replace(os.sep, "/").lstrip("./")
+
+    if rel == PMA_DIRNAME:
+        for n in names:
+            if n not in PMA_KEEP_ONLY:
+                ignored.add(n)
+
+    return ignored
+
+
+# ---------------------------------------------------------------------------
 def create(name: str | None = None) -> Path | None:
     paths.BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     ts = _timestamp()
@@ -65,18 +115,26 @@ def create(name: str | None = None) -> Path | None:
     ui.step(f"Creating backup: {out.name}")
     tmp = Path(tempfile.mkdtemp(prefix="myserver-backup-"))
     db_ok = True
+    pma_cfg_backed_up = False
+
     try:
         # ---- htdocs ----
         ui.info("Copying htdocs...")
         if paths.HTDOCS_DIR.exists():
             try:
                 shutil.copytree(
-                    paths.HTDOCS_DIR, tmp / "htdocs", symlinks=False,
-                    ignore=shutil.ignore_patterns(
-                        "*.log", ".git", "node_modules", "vendor",
-                        "cache", ".cache", "tmp"))
+                    paths.HTDOCS_DIR,
+                    tmp / "htdocs",
+                    symlinks=False,
+                    ignore=_ignore_for_backup,
+                )
             except Exception as e:
                 ui.warn(f"htdocs copy partial: {e}")
+
+        # ---- phpMyAdmin config check ----
+        pma_cfg_backed_up = (tmp / "htdocs" / PMA_DIRNAME / "config.inc.php").exists()
+        if pma_cfg_backed_up:
+            ui.info("phpMyAdmin: config saved (binary will be reinstalled on restore).")
 
         # ---- mysql dump ----
         ui.info("Dumping databases...")
@@ -92,7 +150,7 @@ def create(name: str | None = None) -> Path | None:
                 ui.info("No user databases to dump.")
                 dump_file.write_text("-- No user databases\n")
             else:
-                dump_bin = helpers.mysql_dump()   # ← الإصلاح
+                dump_bin = helpers.mysql_dump()
                 cmd = [
                     dump_bin,
                     "-u", "root",
@@ -129,10 +187,10 @@ def create(name: str | None = None) -> Path | None:
         cfg_dir = tmp / "config"
         cfg_dir.mkdir(exist_ok=True)
         for src, dst in (
-            (paths.NGINX_CONF,          "nginx.conf"),
-            (paths.PHP_FPM_CONF,        "www.conf"),
+            (paths.NGINX_CONF,           "nginx.conf"),
+            (paths.PHP_FPM_CONF,         "www.conf"),
             (helpers.get_php_ini_path(), "php.ini"),
-            (paths.MY_CNF_FILE,         "my.cnf"),
+            (paths.MY_CNF_FILE,          "my.cnf"),
         ):
             try:
                 if src.exists():
@@ -147,10 +205,11 @@ def create(name: str | None = None) -> Path | None:
             "myserver_version": _read_version(),
             "htdocs_path": str(paths.HTDOCS_DIR),
             "includes": {
-                "htdocs": (tmp / "htdocs").exists(),
-                "mysql":  dump_file.exists() and dump_file.stat().st_size > 100,
-                "ssl":    any(ssl_dir.iterdir()),
-                "config": True,
+                "htdocs":          (tmp / "htdocs").exists(),
+                "phpmyadmin_cfg":  pma_cfg_backed_up,
+                "mysql":           dump_file.exists() and dump_file.stat().st_size > 100,
+                "ssl":             any(ssl_dir.iterdir()),
+                "config":          True,
             },
             "database_ok": db_ok,
         }
@@ -166,6 +225,7 @@ def create(name: str | None = None) -> Path | None:
         if not db_ok:
             ui.warn("Note: database dump had warnings — verify the archive.")
         return out
+
     except Exception as e:
         ui.err(f"Backup failed: {e}")
         try:
@@ -258,6 +318,14 @@ def restore(archive_path: str, force: bool = False) -> bool:
         services_ctl.stop_all(quiet=True)
 
         # ---- htdocs ----
+        saved_pma_cfg_text: str | None = None
+        pma_cfg_in_archive = tmp / "htdocs" / PMA_DIRNAME / "config.inc.php"
+        if pma_cfg_in_archive.exists():
+            try:
+                saved_pma_cfg_text = pma_cfg_in_archive.read_text()
+            except Exception as e:
+                ui.warn(f"Could not read saved phpMyAdmin config: {e}")
+
         if (tmp / "htdocs").exists():
             ui.info("Restoring htdocs...")
             if paths.HTDOCS_DIR.exists():
@@ -310,12 +378,35 @@ def restore(archive_path: str, force: bool = False) -> bool:
                 else:
                     ui.ok("Databases restored.")
 
-        # fix permissions
+        # ---- fix permissions ----
         from ..services import nginx
         nginx.enforce_htdocs_permissions(paths.HTDOCS_DIR)
 
+        # ---- phpMyAdmin reinstall (not stored in backup) ----
+        if saved_pma_cfg_text:
+            ui.step("Reinstalling phpMyAdmin fresh (tool, not user data)...")
+            try:
+                from . import quickstart
+                # read db password from freshly restored ~/.my.cnf
+                db_pass = mariadb.read_password_from_my_cnf()
+                ok = quickstart.install_phpmyadmin(paths.HTDOCS_DIR, db_pass)
+                if ok:
+                    # overwrite the auto-generated config with the saved one
+                    target_cfg = paths.HTDOCS_DIR / PMA_DIRNAME / "config.inc.php"
+                    try:
+                        target_cfg.write_text(saved_pma_cfg_text)
+                        ui.ok("phpMyAdmin config.inc.php restored from backup.")
+                    except Exception as e:
+                        ui.warn(f"Could not restore saved phpMyAdmin config: {e}")
+                else:
+                    ui.warn("phpMyAdmin reinstall failed — reinstall later:")
+                    ui.info("  myserver → 5 → 4   (or 'myserver quickstart')")
+            except Exception as e:
+                ui.warn(f"phpMyAdmin reinstall error: {e}")
+
         ui.ok("Restore complete. Start the server with: myserver start")
         return True
+
     except Exception as e:
         ui.err(f"Restore failed: {e}")
         return False
@@ -323,6 +414,7 @@ def restore(archive_path: str, force: bool = False) -> bool:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+# ---------------------------------------------------------------------------
 def delete(archive_path: str) -> bool:
     p = Path(archive_path).expanduser()
     if not p.exists():
@@ -338,6 +430,7 @@ def delete(archive_path: str) -> bool:
         ui.err(f"Delete failed: {e}")
         return False
 
+
 # ---------------------------------------------------------------------------
 def choose_and_restore() -> bool:
     """Interactive restore: show backups via fzf (arrow keys), then restore."""
@@ -347,7 +440,6 @@ def choose_and_restore() -> bool:
         ui.info("Create one first:  myserver backup")
         return False
 
-    # build human-readable option labels (index-aligned with `backups`)
     options: list[str] = []
     for b in backups:
         try:
@@ -364,7 +456,7 @@ def choose_and_restore() -> bool:
     idx = ui.choose_option(
         "Select a backup to restore",
         options,
-        default=0)          # newest backup is at index 0
+        default=0)
 
     # --- Cancel ---
     if idx == len(options) - 1:
