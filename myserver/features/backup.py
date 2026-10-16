@@ -16,6 +16,9 @@ Design notes:
       secure version after every restore.
     * System databases (mysql, information_schema, ...) are excluded from
       the dump so restores do not clobber server users.
+    * Database listing uses information_schema.SCHEMATA (reliable on all
+      MariaDB/MySQL versions) instead of SHOW DATABASES WHERE (which
+      silently returns zero rows on some MariaDB builds).
 """
 from __future__ import annotations
 
@@ -39,6 +42,10 @@ SYSTEM_DBS = ("mysql", "information_schema", "performance_schema", "sys")
 PMA_DIRNAME   = "phpmyadmin"
 PMA_KEEP_ONLY = {"config.inc.php"}   # ← only this file survives backup
 
+# Minimum size (bytes) for a SQL dump to be considered "meaningful".
+# Anything below this is treated as "no databases" and skipped on restore.
+MIN_SQL_DUMP_SIZE = 200
+
 
 # ---------------------------------------------------------------------------
 def _timestamp() -> str:
@@ -54,16 +61,31 @@ def _read_version() -> str:
 
 # ---------------------------------------------------------------------------
 def _list_user_databases() -> list[str]:
-    """Return user databases (excluding system schemas)."""
+    """Return user databases (excluding system schemas).
+
+    Uses information_schema.SCHEMATA, NOT `SHOW DATABASES WHERE Database
+    NOT IN (...)`. The latter returns zero rows silently on many MariaDB
+    versions because the column name is case-sensitive and its availability
+    varies. information_schema.SCHEMATA works reliably on all versions.
+    """
     cli = helpers.mysql_client()
     r = helpers.run_cmd_capture(
         f"{cli} -u root --socket='{paths.MARIADB_SOCKET}' -N -B -e "
-        f"\"SHOW DATABASES WHERE `Database` NOT IN "
+        f"\"SELECT SCHEMA_NAME FROM information_schema.SCHEMATA "
+        f"WHERE SCHEMA_NAME NOT IN "
         f"('mysql','information_schema','performance_schema','sys');\"",
         timeout=15)
     if r.returncode != 0:
+        err = (r.stderr or "").strip().splitlines()
+        ui.warn(f"DB list failed: {err[0][:200] if err else 'unknown error'}")
         return []
-    return [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
+
+    dbs = [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
+    if dbs:
+        ui.info(f"Found {len(dbs)} user database(s): {', '.join(dbs)}")
+    else:
+        ui.warn("No user databases found to back up.")
+    return dbs
 
 
 # ---------------------------------------------------------------------------
@@ -144,6 +166,7 @@ def create(name: str | None = None) -> Path | None:
         if not mariadb.start_mariadb_background():
             ui.warn("MariaDB did not start — DB dump skipped.")
             db_ok = False
+            dump_file.write_text("-- MariaDB failed to start\n")
         else:
             dbs = _list_user_databases()
             if not dbs:
@@ -199,6 +222,7 @@ def create(name: str | None = None) -> Path | None:
                 ui.warn(f"Config copy failed ({dst}): {e}")
 
         # ---- manifest ----
+        dump_size = dump_file.stat().st_size if dump_file.exists() else 0
         manifest = {
             "format": MANIFEST_VERSION,
             "created_at": datetime.now(timezone.utc).isoformat(),
@@ -207,11 +231,12 @@ def create(name: str | None = None) -> Path | None:
             "includes": {
                 "htdocs":          (tmp / "htdocs").exists(),
                 "phpmyadmin_cfg":  pma_cfg_backed_up,
-                "mysql":           dump_file.exists() and dump_file.stat().st_size > 100,
+                "mysql":           dump_size >= MIN_SQL_DUMP_SIZE,
                 "ssl":             any(ssl_dir.iterdir()),
                 "config":          True,
             },
             "database_ok": db_ok,
+            "sql_dump_bytes": dump_size,
         }
         (tmp / "manifest.json").write_text(json.dumps(manifest, indent=2))
 
@@ -362,21 +387,37 @@ def restore(archive_path: str, force: bool = False) -> bool:
 
         # ---- mysql ----
         dump = tmp / "mysql" / "all-databases.sql"
-        if dump.exists() and dump.stat().st_size > 100:
-            ui.info("Restoring databases...")
-            if not mariadb.start_mariadb_background():
-                ui.warn("MariaDB did not start — DB restore skipped.")
+        if not dump.exists():
+            ui.warn("No SQL dump in archive — DB restore skipped.")
+        elif dump.stat().st_size < MIN_SQL_DUMP_SIZE:
+            ui.warn(f"SQL dump too small ({dump.stat().st_size} bytes) — "
+                    f"likely empty; DB restore skipped.")
+            ui.info("Tip: this archive was created by an older version of "
+                    "myserver. Databases were not captured. Create a fresh "
+                    "backup with the current version.")
+        elif not mariadb.start_mariadb_background():
+            ui.warn("MariaDB did not start — DB restore skipped.")
+        else:
+            ui.info(f"Restoring databases from "
+                    f"{dump.stat().st_size / 1024:.1f} KB dump...")
+            cli = helpers.mysql_client()
+            with open(dump, "rb") as f:
+                r = subprocess.run(
+                    [cli, "-u", "root", f"--socket={paths.MARIADB_SOCKET}"],
+                    stdin=f, stderr=subprocess.PIPE)
+            if r.returncode != 0:
+                err = (r.stderr or b"").decode(errors="ignore").strip()
+                ui.err(f"DB restore FAILED (rc={r.returncode}):")
+                for line in err.splitlines()[:8]:
+                    print(f"    {line}")
+                ui.info("The server continues, but data may be incomplete.")
             else:
-                cli = helpers.mysql_client()
-                with open(dump, "rb") as f:
-                    r = subprocess.run(
-                        [cli, "-u", "root", f"--socket={paths.MARIADB_SOCKET}"],
-                        stdin=f, stderr=subprocess.PIPE)
-                if r.returncode != 0:
-                    err = (r.stderr or b"").decode(errors="ignore").strip()[:300]
-                    ui.warn(f"DB restore warning: {err}")
+                dbs_now = _list_user_databases()
+                if dbs_now:
+                    ui.ok(f"Databases restored ({len(dbs_now)}): "
+                          + ", ".join(dbs_now))
                 else:
-                    ui.ok("Databases restored.")
+                    ui.warn("Import succeeded but no user databases found.")
 
         # ---- fix permissions ----
         from ..services import nginx
@@ -387,11 +428,9 @@ def restore(archive_path: str, force: bool = False) -> bool:
             ui.step("Reinstalling phpMyAdmin fresh (tool, not user data)...")
             try:
                 from . import quickstart
-                # read db password from freshly restored ~/.my.cnf
                 db_pass = mariadb.read_password_from_my_cnf()
                 ok = quickstart.install_phpmyadmin(paths.HTDOCS_DIR, db_pass)
                 if ok:
-                    # overwrite the auto-generated config with the saved one
                     target_cfg = paths.HTDOCS_DIR / PMA_DIRNAME / "config.inc.php"
                     try:
                         target_cfg.write_text(saved_pma_cfg_text)
