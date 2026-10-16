@@ -1,14 +1,11 @@
 """Full-stack backup & restore as .tar.gz archives.
 
-Layout inside archive:
+Archive layout:
     manifest.json
     htdocs/...
     mysql/all-databases.sql
-    ssl/{server.crt,server.key,custom.crt,custom.key?}
-    config/nginx.conf
-    config/www.conf
-    config/php.ini
-    config/my.cnf
+    ssl/{server.crt,server.key,custom.crt?,custom.key?}
+    config/{nginx.conf,www.conf,php.ini,my.cnf}
 """
 from __future__ import annotations
 
@@ -18,7 +15,6 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -27,6 +23,7 @@ from ..services import mariadb
 
 
 MANIFEST_VERSION = 1
+SYSTEM_DBS = ("mysql", "information_schema", "performance_schema", "sys")
 
 
 # ---------------------------------------------------------------------------
@@ -42,6 +39,20 @@ def _read_version() -> str:
 
 
 # ---------------------------------------------------------------------------
+def _list_user_databases() -> list[str]:
+    """Return user databases (excluding system schemas)."""
+    cli = helpers.mysql_client()
+    r = helpers.run_cmd_capture(
+        f"{cli} -u root --socket='{paths.MARIADB_SOCKET}' -N -B -e "
+        f"\"SHOW DATABASES WHERE `Database` NOT IN "
+        f"('mysql','information_schema','performance_schema','sys');\"",
+        timeout=15)
+    if r.returncode != 0:
+        return []
+    return [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
+
+
+# ---------------------------------------------------------------------------
 def create(name: str | None = None) -> Path | None:
     paths.BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     ts = _timestamp()
@@ -53,34 +64,55 @@ def create(name: str | None = None) -> Path | None:
 
     ui.step(f"Creating backup: {out.name}")
     tmp = Path(tempfile.mkdtemp(prefix="myserver-backup-"))
+    db_ok = True
     try:
         # ---- htdocs ----
         ui.info("Copying htdocs...")
         if paths.HTDOCS_DIR.exists():
-            shutil.copytree(paths.HTDOCS_DIR, tmp / "htdocs", symlinks=False,
-                            ignore=shutil.ignore_patterns(
-                                "*.log", ".git", "node_modules", "vendor"))
+            try:
+                shutil.copytree(
+                    paths.HTDOCS_DIR, tmp / "htdocs", symlinks=False,
+                    ignore=shutil.ignore_patterns(
+                        "*.log", ".git", "node_modules", "vendor",
+                        "cache", ".cache", "tmp"))
+            except Exception as e:
+                ui.warn(f"htdocs copy partial: {e}")
 
         # ---- mysql dump ----
         ui.info("Dumping databases...")
         (tmp / "mysql").mkdir(exist_ok=True)
         dump_file = tmp / "mysql" / "all-databases.sql"
+
         if not mariadb.start_mariadb_background():
             ui.warn("MariaDB did not start — DB dump skipped.")
+            db_ok = False
         else:
-            cli = helpers.mysql_client()
-            # excludes system schemas
-            with open(dump_file, "wb") as f:
-                r = subprocess.run(
-                    [cli, "-u", "root", f"--socket={paths.MARIADB_SOCKET}",
-                     "--single-transaction", "--routines", "--triggers",
-                     "--events", "--all-databases",
-                     "--ignore-table=mysql.user"],
-                    stdout=f, stderr=subprocess.PIPE)
-            if r.returncode != 0:
-                ui.warn(f"mysqldump partial: {r.stderr.decode(errors='ignore')[:200]}")
+            dbs = _list_user_databases()
+            if not dbs:
+                ui.info("No user databases to dump.")
+                dump_file.write_text("-- No user databases\n")
             else:
-                ui.ok("Database dump saved.")
+                dump_bin = helpers.mysql_dump()   # ← الإصلاح
+                cmd = [
+                    dump_bin,
+                    "-u", "root",
+                    f"--socket={paths.MARIADB_SOCKET}",
+                    "--single-transaction",
+                    "--routines",
+                    "--triggers",
+                    "--events",
+                    "--databases", *dbs,
+                ]
+                with open(dump_file, "wb") as f:
+                    r = subprocess.run(cmd, stdout=f, stderr=subprocess.PIPE)
+                if r.returncode != 0:
+                    err = (r.stderr or b"").decode(errors="ignore").strip()[:300]
+                    ui.warn(f"mysqldump warning: {err}")
+                    db_ok = False
+                else:
+                    size_kb = dump_file.stat().st_size / 1024
+                    ui.ok(f"Database dump saved ({size_kb:.1f} KB, "
+                          f"{len(dbs)} database(s)).")
 
         # ---- ssl ----
         ssl_dir = tmp / "ssl"
@@ -97,10 +129,10 @@ def create(name: str | None = None) -> Path | None:
         cfg_dir = tmp / "config"
         cfg_dir.mkdir(exist_ok=True)
         for src, dst in (
-            (paths.NGINX_CONF,  "nginx.conf"),
-            (paths.PHP_FPM_CONF, "www.conf"),
+            (paths.NGINX_CONF,          "nginx.conf"),
+            (paths.PHP_FPM_CONF,        "www.conf"),
             (helpers.get_php_ini_path(), "php.ini"),
-            (paths.MY_CNF_FILE, "my.cnf"),
+            (paths.MY_CNF_FILE,         "my.cnf"),
         ):
             try:
                 if src.exists():
@@ -116,10 +148,11 @@ def create(name: str | None = None) -> Path | None:
             "htdocs_path": str(paths.HTDOCS_DIR),
             "includes": {
                 "htdocs": (tmp / "htdocs").exists(),
-                "mysql":  dump_file.exists(),
+                "mysql":  dump_file.exists() and dump_file.stat().st_size > 100,
                 "ssl":    any(ssl_dir.iterdir()),
                 "config": True,
             },
+            "database_ok": db_ok,
         }
         (tmp / "manifest.json").write_text(json.dumps(manifest, indent=2))
 
@@ -130,6 +163,8 @@ def create(name: str | None = None) -> Path | None:
 
         size_mb = out.stat().st_size / (1024 * 1024)
         ui.ok(f"Backup created: {out}  ({size_mb:.2f} MB)")
+        if not db_ok:
+            ui.warn("Note: database dump had warnings — verify the archive.")
         return out
     except Exception as e:
         ui.err(f"Backup failed: {e}")
@@ -175,14 +210,16 @@ def restore(archive_path: str, force: bool = False) -> bool:
     tmp = Path(tempfile.mkdtemp(prefix="myserver-restore-"))
     try:
         with tarfile.open(src, "r:gz") as tar:
-            # safe extract
             def _safe(member, dest):
                 target = (dest / member.name).resolve()
                 if not str(target).startswith(str(dest.resolve())):
                     raise RuntimeError(f"Unsafe path in archive: {member.name}")
             for member in tar.getmembers():
                 _safe(member, tmp)
-            tar.extractall(tmp, filter="data")
+            try:
+                tar.extractall(tmp, filter="data")
+            except TypeError:
+                tar.extractall(tmp)
 
         manifest_file = tmp / "manifest.json"
         if not manifest_file.exists():
@@ -203,12 +240,12 @@ def restore(archive_path: str, force: bool = False) -> bool:
               ", ".join(k for k, v in includes.items() if v))
 
         if not force:
-            ui.warn("Restore will OVERWRITE current htdocs, databases, SSL, and configs.")
+            ui.warn("Restore will OVERWRITE current htdocs, databases, SSL, configs.")
             if not ui.confirm("Continue?", default=False):
                 ui.info("Cancelled.")
                 return False
 
-        # ---- safety snapshot of current state ----
+        # ---- safety snapshot ----
         ui.step("Creating safety backup of current state...")
         safety = create(f"pre-restore-{_timestamp()}")
         if safety:
@@ -217,7 +254,7 @@ def restore(archive_path: str, force: bool = False) -> bool:
             ui.warn("Safety backup failed — continuing anyway.")
 
         # ---- stop services ----
-        from ..cli import services_ctl  # local import to avoid cycle
+        from ..cli import services_ctl
         services_ctl.stop_all(quiet=True)
 
         # ---- htdocs ----
@@ -257,7 +294,7 @@ def restore(archive_path: str, force: bool = False) -> bool:
 
         # ---- mysql ----
         dump = tmp / "mysql" / "all-databases.sql"
-        if dump.exists():
+        if dump.exists() and dump.stat().st_size > 100:
             ui.info("Restoring databases...")
             if not mariadb.start_mariadb_background():
                 ui.warn("MariaDB did not start — DB restore skipped.")
@@ -268,7 +305,8 @@ def restore(archive_path: str, force: bool = False) -> bool:
                         [cli, "-u", "root", f"--socket={paths.MARIADB_SOCKET}"],
                         stdin=f, stderr=subprocess.PIPE)
                 if r.returncode != 0:
-                    ui.warn(f"DB restore partial: {r.stderr.decode(errors='ignore')[:200]}")
+                    err = (r.stderr or b"").decode(errors="ignore").strip()[:300]
+                    ui.warn(f"DB restore warning: {err}")
                 else:
                     ui.ok("Databases restored.")
 

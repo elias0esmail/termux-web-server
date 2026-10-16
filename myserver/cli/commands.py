@@ -436,8 +436,10 @@ def main() -> int:
         return 0 if backup.restore(rest[0]) else 1
 
     # ---- diagnostics ----
-    if cmd == "doctor":
-        return doctor.run()
+    # ---- diagnostics ----
+if cmd == "doctor":
+    do_fix = any(a in ("--fix", "-f") for a in rest)
+    return doctor.run(fix=do_fix)
     if cmd == "logs":
         which = rest[0] if rest else "nginx"
         return cmd_logs(which)

@@ -139,6 +139,13 @@ def mysql_client() -> str:
 
 def mysql_admin() -> str:
     return "mariadb-admin" if command_exists("mariadb-admin") else "mysqladmin"
+  
+def mysql_dump() -> str:
+    """Return the dump binary (mariadb-dump / mysqldump).
+       NOTE: this is different from mysql_client() which is the shell client."""
+    if command_exists("mariadb-dump"):
+        return "mariadb-dump"
+    return "mysqldump"
 
 
 def sql_escape(s: str) -> str:
@@ -148,6 +155,39 @@ def sql_escape(s: str) -> str:
 def cnf_escape(s: str) -> str:
     return s.replace("\\", "\\\\").replace('"', '\\"')
 
+# ---------------------------------------------------------------------------
+# Internet check — tries multiple endpoints
+# ---------------------------------------------------------------------------
+_INTERNET_ENDPOINTS = (
+    ("https://www.google.com/generate_204",  "Google"),
+    ("https://api.github.com",               "GitHub"),
+    ("https://1.1.1.1",                      "Cloudflare DNS"),
+    ("https://www.cloudflare.com/cdn-cgi/trace", "Cloudflare Trace"),
+)
+
+
+def check_internet(timeout: int = 6) -> tuple[bool, str]:
+    """Try several HTTPS endpoints; return (online, diagnostic).
+
+    Tries the fastest / most reliable endpoints first. Any 2xx/3xx or 204
+    response counts as success. Also accepts HTTP 204 for generate_204.
+    """
+    last_err = ""
+    for url, name in _INTERNET_ENDPOINTS:
+        try:
+            r = subprocess.run(
+                ["curl", "-s", "-L", "--max-time", str(timeout),
+                 "-o", "/dev/null", "-w", "%{http_code}", url],
+                capture_output=True, text=True, timeout=timeout + 4)
+            code = (r.stdout or "").strip()
+            if r.returncode == 0 and code[:1] in ("2", "3"):
+                return True, f"via {name} (HTTP {code})"
+            last_err = f"{name} returned {code or 'no-code'} (rc={r.returncode})"
+        except subprocess.TimeoutExpired:
+            last_err = f"{name} timed out"
+        except Exception as e:
+            last_err = f"{name}: {e}"
+    return False, last_err or "no endpoint reachable"
 
 # ---------------------------------------------------------------------------
 # Ports
