@@ -6,12 +6,15 @@ myserver-live — Live Reload helper for Termux Web Server.
 - Falls back to polling every 3 seconds.
 - 500ms debounce on file changes.
 - Honors .myserver-ignore at the watched root.
+- Reacts ONLY to real writes (MODIFY, CLOSE_WRITE, CREATE, DELETE, MOVE_*).
+  Read-only events (OPEN, ACCESS, CLOSE_NOWRITE) are ignored — this is
+  critical for apps that re-read their own files on every request.
 - Ignores only genuinely non-editable paths:
     * VCS:        .git, .svn, .hg
     * Editors:    .idea, .vscode, .vs
     * Deps:       node_modules, vendor, bower_components
     * Runtime:    __pycache__, .myserver-cache
-    * Tool:       phpmyadmin  (writes tmp/sessions on every request)
+    * Tool:       phpmyadmin
   and by extension/name:
     * *.log *.tmp *.temp *.swp *.swo *.lock *.pid *.sess *.session
     * sess_*  .~lock.*
@@ -45,41 +48,53 @@ POLL_FALLBACK = 3.0       # seconds
 IGNORE_FILE   = HTDOCS_DIR / ".myserver-ignore"
 
 # ---------------------------------------------------------------------------
-# IMPORTANT: keep this list SHORT and only include paths that genuinely
-# cannot contain files a developer would edit. Overly broad lists hide
-# legitimate changes (e.g. excluding `storage/` hides template edits in
-# Laravel/Blade projects).
-#
-# Per-project silences belong in a `.myserver-ignore` file, not here.
+# Event whitelist: only these inotify events mean "the file actually changed".
+# Everything else (OPEN, ACCESS, CLOSE_NOWRITE, ISDIR, ...) is noise from
+# apps that re-read their own files on every request.
+# ---------------------------------------------------------------------------
+RELOAD_EVENTS = {
+    "MODIFY",
+    "CLOSE_WRITE",     # most editors and PHP tools write then close
+    "CREATE",
+    "DELETE",
+    "MOVED_TO",
+    "MOVED_FROM",
+    "MOVE",
+    "ATTRIB",          # chmod / chown can matter for PHP
+}
+
+# ---------------------------------------------------------------------------
+# Directory name blocklist. Kept SHORT: only include names that cannot
+# contain files a developer would legitimately edit.
+# Per-project silences belong in .myserver-ignore, not here.
 # ---------------------------------------------------------------------------
 DEFAULT_IGNORE_DIRS = {
-    # --- VCS ---
+    # VCS
     ".git", ".svn", ".hg",
-    # --- Editors ---
+    # Editors
     ".idea", ".vscode", ".vs",
-    # --- Dependencies (huge, never edited by hand) ---
+    # Dependencies (huge, never edited by hand)
     "node_modules", "vendor", "bower_components",
-    # --- Python cache ---
+    # Python cache
     "__pycache__",
-    # --- Our own runtime cache ---
+    # Our own runtime cache
     ".myserver-cache",
-    # --- phpMyAdmin: writes tmp/ and sessions on every request;
-    #     this was the primary source of reload loops. ---
+    # phpMyAdmin: writes tmp/ and sessions on every request
     "phpmyadmin",
 }
 
 # File extensions that never trigger reload.
 DEFAULT_IGNORE_EXTS = {
     ".log", ".tmp", ".temp",
-    ".swp", ".swo",               # vim swap files
-    ".lock", ".pid",              # locks and pid files
-    ".sess", ".session",          # PHP session files
+    ".swp", ".swo",
+    ".lock", ".pid",
+    ".sess", ".session",
 }
 
 # Filename prefixes that never trigger reload.
 DEFAULT_IGNORE_PREFIXES = (
-    "sess_",       # PHP session files: sess_abc123
-    ".~lock.",     # LibreOffice / OpenOffice lock files
+    "sess_",
+    ".~lock.",
 )
 
 
@@ -145,25 +160,44 @@ def _is_ignored(path: str) -> bool:
         if fnmatch.fnmatch(rel_fwd, pat) or fnmatch.fnmatch("/" + rel_fwd, pat):
             return True
 
-    # --- built-in directory filter: match any *parent* path component ---
+    # --- built-in directory filter ---
     parts = rel_fwd.split("/")
-    for part in parts[:-1]:          # all parent dirs except the filename
+    for part in parts[:-1]:
         if part in DEFAULT_IGNORE_DIRS:
             return True
-    # also if the basename itself IS one of the excluded dir names
     if basename in DEFAULT_IGNORE_DIRS:
         return True
 
     return False
 
 
+def _should_reload(event_str: str, path: str) -> bool:
+    """Decide whether an inotify event + path should trigger a reload.
+
+    Only writes matter — reads (OPEN, ACCESS, CLOSE_NOWRITE) are noise
+    from apps that poll their own files.
+    """
+    # 1) event whitelist
+    events = {e.strip() for e in event_str.split(",")}
+    if not (events & RELOAD_EVENTS):
+        return False
+
+    # 2) skip if the event is only ISDIR (dir metadata, not file content)
+    if events == {"ISDIR"}:
+        return False
+
+    # 3) path blacklist / .myserver-ignore
+    if _is_ignored(path):
+        return False
+
+    return True
+
+
 def _build_inotify_exclude_regex() -> str:
     """Build an --exclude regex for inotifywait.
 
-    inotifywait matches this regex against the *full path* of every file.
-    We anchor directory names to '/' boundaries and file prefixes to the
-    beginning of the basename, to avoid false positives like matching
-    'tmp' inside a folder named 'tmp-project'.
+    Directory names are anchored to '/' boundaries so names like
+    'tmp-project' do not falsely match 'tmp'.
     """
     dirs = "|".join(
         _re.escape(d) for d in sorted(DEFAULT_IGNORE_DIRS, key=len, reverse=True)
@@ -174,9 +208,6 @@ def _build_inotify_exclude_regex() -> str:
     prefixes = "|".join(
         _re.escape(p) for p in DEFAULT_IGNORE_PREFIXES
     )
-    #   /DIR/              → directory boundary match
-    #   \.(ext)$           → extension at end of path
-    #   /prefix[^/]*$      → filename starting with prefix
     return (
         f"/({dirs})/"
         f"|\\.({exts})$"
@@ -223,7 +254,7 @@ def _has_inotifywait() -> bool:
 
 
 def _run_inotify():
-    log("watcher: inotifywait (event-driven)")
+    log("watcher: inotifywait (event-driven, write-only filter)")
     exclude = _build_inotify_exclude_regex()
     cmd = [
         "inotifywait", "-m", "-r", "-q",
@@ -250,10 +281,10 @@ def _run_inotify():
                 line = line.strip()
                 if not line or "|" not in line:
                     continue
-                path, _event = line.split("|", 1)
-                if _is_ignored(path):
+                path, event = line.split("|", 1)
+                if not _should_reload(event, path):
                     continue
-                log(f"change: {path}")
+                log(f"change: {path}  [{event}]")
                 _schedule_broadcast()
         except Exception as e:
             log(f"inotify loop error: {e}")
@@ -278,6 +309,7 @@ def _run_inotify():
 
 # ---------------------------------------------------------------------------
 def _scan_mtimes() -> dict[str, int]:
+    """Polling fallback: mtime-based; ignores read-only events by design."""
     result: dict[str, int] = {}
     try:
         for root, dirs, files in os.walk(HTDOCS_DIR):
@@ -350,7 +382,7 @@ JS_PAYLOAD = (
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "myserver-live/2.21.10"
+    server_version = "myserver-live/2.21.11"
 
     def log_message(self, fmt, *args):
         pass
