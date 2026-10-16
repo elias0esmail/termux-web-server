@@ -6,7 +6,15 @@ myserver-live — Live Reload helper for Termux Web Server.
 - Falls back to polling every 3 seconds.
 - 500ms debounce on file changes.
 - Honors .myserver-ignore at the watched root.
-- Ignores caches, sessions, logs, phpMyAdmin, vendor, node_modules.
+- Ignores only genuinely non-editable paths:
+    * VCS:        .git, .svn, .hg
+    * Editors:    .idea, .vscode, .vs
+    * Deps:       node_modules, vendor, bower_components
+    * Runtime:    __pycache__, .myserver-cache
+    * Tool:       phpmyadmin  (writes tmp/sessions on every request)
+  and by extension/name:
+    * *.log *.tmp *.temp *.swp *.swo *.lock *.pid *.sess *.session
+    * sess_*  .~lock.*
 - SSE clients capped at MYSERVER_LIVE_MAX_CLIENTS (default 50).
 - Idle clients auto-disconnected after 90s without ping.
 - Binds to 127.0.0.1 only.
@@ -36,35 +44,43 @@ DEBOUNCE_MS   = 500       # coalesce bursts of events
 POLL_FALLBACK = 3.0       # seconds
 IGNORE_FILE   = HTDOCS_DIR / ".myserver-ignore"
 
-# Directories whose *content* never triggers reload.
+# ---------------------------------------------------------------------------
+# IMPORTANT: keep this list SHORT and only include paths that genuinely
+# cannot contain files a developer would edit. Overly broad lists hide
+# legitimate changes (e.g. excluding `storage/` hides template edits in
+# Laravel/Blade projects).
+#
+# Per-project silences belong in a `.myserver-ignore` file, not here.
+# ---------------------------------------------------------------------------
 DEFAULT_IGNORE_DIRS = {
-    # VCS / editors
-    ".git", ".svn", ".hg", ".idea", ".vscode", ".vs",
-    # Dependencies
+    # --- VCS ---
+    ".git", ".svn", ".hg",
+    # --- Editors ---
+    ".idea", ".vscode", ".vs",
+    # --- Dependencies (huge, never edited by hand) ---
     "node_modules", "vendor", "bower_components",
-    # Caches / temp / sessions
-    "cache", ".cache", "__pycache__",
-    "tmp", "temp", "sessions", "session",
+    # --- Python cache ---
+    "__pycache__",
+    # --- Our own runtime cache ---
     ".myserver-cache",
-    # Logs
-    "logs", "log",
-    # Framework runtime storage
-    "storage",
-    # phpMyAdmin — never edit by hand, it writes tmp/ every request
+    # --- phpMyAdmin: writes tmp/ and sessions on every request;
+    #     this was the primary source of reload loops. ---
     "phpmyadmin",
-    # Common upload/runtime dirs
-    "uploads", "uploads_tmp",
 }
 
 # File extensions that never trigger reload.
 DEFAULT_IGNORE_EXTS = {
-    ".log", ".tmp", ".temp", ".swp", ".swo", ".lock", ".pid",
-    ".sess", ".session",
-    ".cache",
+    ".log", ".tmp", ".temp",
+    ".swp", ".swo",               # vim swap files
+    ".lock", ".pid",              # locks and pid files
+    ".sess", ".session",          # PHP session files
 }
 
 # Filename prefixes that never trigger reload.
-DEFAULT_IGNORE_PREFIXES = ("sess_", ".~lock.")
+DEFAULT_IGNORE_PREFIXES = (
+    "sess_",       # PHP session files: sess_abc123
+    ".~lock.",     # LibreOffice / OpenOffice lock files
+)
 
 
 # ---------------------------------------------------------------------------
@@ -124,16 +140,17 @@ def _is_ignored(path: str) -> bool:
         if basename.startswith(prefix):
             return True
 
-    # --- user-supplied patterns ---
+    # --- user-supplied patterns from .myserver-ignore ---
     for pat in _ignore_patterns:
         if fnmatch.fnmatch(rel_fwd, pat) or fnmatch.fnmatch("/" + rel_fwd, pat):
             return True
 
-    # --- built-in directory filter ---
+    # --- built-in directory filter: match any *parent* path component ---
     parts = rel_fwd.split("/")
-    for part in parts[:-1]:
+    for part in parts[:-1]:          # all parent dirs except the filename
         if part in DEFAULT_IGNORE_DIRS:
             return True
+    # also if the basename itself IS one of the excluded dir names
     if basename in DEFAULT_IGNORE_DIRS:
         return True
 
@@ -141,18 +158,29 @@ def _is_ignored(path: str) -> bool:
 
 
 def _build_inotify_exclude_regex() -> str:
-    """Build an --exclude regex for inotifywait so it filters at the source."""
+    """Build an --exclude regex for inotifywait.
+
+    inotifywait matches this regex against the *full path* of every file.
+    We anchor directory names to '/' boundaries and file prefixes to the
+    beginning of the basename, to avoid false positives like matching
+    'tmp' inside a folder named 'tmp-project'.
+    """
     dirs = "|".join(
         _re.escape(d) for d in sorted(DEFAULT_IGNORE_DIRS, key=len, reverse=True)
     )
     exts = "|".join(
         _re.escape(e.lstrip(".")) for e in sorted(DEFAULT_IGNORE_EXTS)
     )
+    prefixes = "|".join(
+        _re.escape(p) for p in DEFAULT_IGNORE_PREFIXES
+    )
+    #   /DIR/              → directory boundary match
+    #   \.(ext)$           → extension at end of path
+    #   /prefix[^/]*$      → filename starting with prefix
     return (
         f"/({dirs})/"
         f"|\\.({exts})$"
-        f"|/sess_[^/]*$"
-        f"|/\\.~lock\\.[^/]*$"
+        f"|/({prefixes})[^/]*$"
     )
 
 
@@ -322,7 +350,7 @@ JS_PAYLOAD = (
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "myserver-live/2.21.8"
+    server_version = "myserver-live/2.21.10"
 
     def log_message(self, fmt, *args):
         pass
