@@ -4,8 +4,9 @@ myserver-live — Live Reload helper for Termux Web Server.
 
 - Uses inotifywait when available (efficient, event-driven).
 - Falls back to polling every 3 seconds.
-- 300ms debounce on file changes.
-- Honors `.myserver-ignore` at the watched root.
+- 500ms debounce on file changes.
+- Honors .myserver-ignore at the watched root.
+- Ignores caches, sessions, logs, phpMyAdmin, vendor, node_modules.
 - SSE clients capped at MYSERVER_LIVE_MAX_CLIENTS (default 50).
 - Idle clients auto-disconnected after 90s without ping.
 - Binds to 127.0.0.1 only.
@@ -14,6 +15,7 @@ from __future__ import annotations
 
 import fnmatch
 import os
+import re as _re
 import signal
 import subprocess
 import sys
@@ -30,23 +32,48 @@ LOG_FILE      = Path(sys.argv[4]) if len(sys.argv) > 4 else Path("/tmp/myserver-
 
 MAX_CLIENTS   = int(os.environ.get("MYSERVER_LIVE_MAX_CLIENTS", "50"))
 IDLE_TIMEOUT  = 90        # seconds
-DEBOUNCE_MS   = 300
+DEBOUNCE_MS   = 500       # coalesce bursts of events
 POLL_FALLBACK = 3.0       # seconds
 IGNORE_FILE   = HTDOCS_DIR / ".myserver-ignore"
 
+# Directories whose *content* never triggers reload.
 DEFAULT_IGNORE_DIRS = {
-    ".git", "node_modules", "vendor", "cache", ".cache", "__pycache__",
-    ".idea", ".vscode", "storage/framework", "storage/logs",
+    # VCS / editors
+    ".git", ".svn", ".hg", ".idea", ".vscode", ".vs",
+    # Dependencies
+    "node_modules", "vendor", "bower_components",
+    # Caches / temp / sessions
+    "cache", ".cache", "__pycache__",
+    "tmp", "temp", "sessions", "session",
+    ".myserver-cache",
+    # Logs
+    "logs", "log",
+    # Framework runtime storage
+    "storage",
+    # phpMyAdmin — never edit by hand, it writes tmp/ every request
+    "phpmyadmin",
+    # Common upload/runtime dirs
+    "uploads", "uploads_tmp",
 }
-DEFAULT_IGNORE_EXTS = {".log", ".tmp", ".swp", ".swo", ".lock", ".pid"}
+
+# File extensions that never trigger reload.
+DEFAULT_IGNORE_EXTS = {
+    ".log", ".tmp", ".temp", ".swp", ".swo", ".lock", ".pid",
+    ".sess", ".session",
+    ".cache",
+}
+
+# Filename prefixes that never trigger reload.
+DEFAULT_IGNORE_PREFIXES = ("sess_", ".~lock.")
+
 
 # ---------------------------------------------------------------------------
 _state_lock = threading.Lock()
-_clients: list[dict] = []          # [{"wfile": wfile, "last": ts, "id": int}]
+_clients: list[dict] = []
 _shutdown = threading.Event()
 _debounce_timer: threading.Timer | None = None
 _debounce_lock = threading.Lock()
-_ignore_patterns: list[str] = []   # fnmatch patterns
+_ignore_patterns: list[str] = []
 
 
 def log(msg: str):
@@ -60,43 +87,73 @@ def log(msg: str):
 
 # ---------------------------------------------------------------------------
 def _load_ignore():
-    """Load ignore patterns from .myserver-ignore + defaults."""
+    """Load user ignore patterns from .myserver-ignore."""
     global _ignore_patterns
     pats: list[str] = []
-    for d in DEFAULT_IGNORE_DIRS:
-        pats.append(f"*/{d}/*")
     if IGNORE_FILE.exists():
         try:
             for raw in IGNORE_FILE.read_text().splitlines():
                 line = raw.strip()
                 if not line or line.startswith("#"):
                     continue
-                if not line.startswith("*") and "/" not in line:
-                    line = f"*/{line}/*"
                 pats.append(line)
         except Exception as e:
             log(f"ignore file read error: {e}")
     _ignore_patterns = pats
-    log(f"loaded {len(pats)} ignore pattern(s)")
+    if pats:
+        log(f"loaded {len(pats)} user ignore pattern(s)")
 
 
 def _is_ignored(path: str) -> bool:
+    """Return True if this path should NOT trigger a reload."""
     try:
         rel = str(Path(path).resolve().relative_to(HTDOCS_DIR.resolve()))
     except Exception:
         rel = path
-    ext = os.path.splitext(rel)[1].lower()
+
+    rel_fwd = rel.replace(os.sep, "/")
+    basename = os.path.basename(rel_fwd)
+
+    # --- extension filter ---
+    ext = os.path.splitext(basename)[1].lower()
     if ext in DEFAULT_IGNORE_EXTS:
         return True
-    # normalize to forward slashes for matching
-    rel_fwd = rel.replace(os.sep, "/")
+
+    # --- filename prefix filter (sess_xxx, .~lock.xxx) ---
+    for prefix in DEFAULT_IGNORE_PREFIXES:
+        if basename.startswith(prefix):
+            return True
+
+    # --- user-supplied patterns ---
     for pat in _ignore_patterns:
         if fnmatch.fnmatch(rel_fwd, pat) or fnmatch.fnmatch("/" + rel_fwd, pat):
             return True
-    for d in DEFAULT_IGNORE_DIRS:
-        if f"/{d}/" in f"/{rel_fwd}/":
+
+    # --- built-in directory filter ---
+    parts = rel_fwd.split("/")
+    for part in parts[:-1]:
+        if part in DEFAULT_IGNORE_DIRS:
             return True
+    if basename in DEFAULT_IGNORE_DIRS:
+        return True
+
     return False
+
+
+def _build_inotify_exclude_regex() -> str:
+    """Build an --exclude regex for inotifywait so it filters at the source."""
+    dirs = "|".join(
+        _re.escape(d) for d in sorted(DEFAULT_IGNORE_DIRS, key=len, reverse=True)
+    )
+    exts = "|".join(
+        _re.escape(e.lstrip(".")) for e in sorted(DEFAULT_IGNORE_EXTS)
+    )
+    return (
+        f"/({dirs})/"
+        f"|\\.({exts})$"
+        f"|/sess_[^/]*$"
+        f"|/\\.~lock\\.[^/]*$"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -121,7 +178,6 @@ def _broadcast():
 
 
 def _schedule_broadcast():
-    """Debounce — restart timer on every event."""
     global _debounce_timer
     with _debounce_lock:
         if _debounce_timer is not None:
@@ -133,8 +189,6 @@ def _schedule_broadcast():
 
 
 # ---------------------------------------------------------------------------
-# inotify path
-# ---------------------------------------------------------------------------
 def _has_inotifywait() -> bool:
     from shutil import which
     return which("inotifywait") is not None
@@ -142,8 +196,15 @@ def _has_inotifywait() -> bool:
 
 def _run_inotify():
     log("watcher: inotifywait (event-driven)")
-    cmd = ["inotifywait", "-m", "-r", "-q",
-           "--format", "%w%f|%e", str(HTDOCS_DIR)]
+    exclude = _build_inotify_exclude_regex()
+    cmd = [
+        "inotifywait", "-m", "-r", "-q",
+        "--exclude", exclude,
+        "--format", "%w%f|%e",
+        str(HTDOCS_DIR),
+    ]
+    log(f"inotify exclude: {exclude}")
+
     while not _shutdown.is_set():
         try:
             proc = subprocess.Popen(
@@ -188,8 +249,6 @@ def _run_inotify():
 
 
 # ---------------------------------------------------------------------------
-# polling fallback
-# ---------------------------------------------------------------------------
 def _scan_mtimes() -> dict[str, int]:
     result: dict[str, int] = {}
     try:
@@ -197,9 +256,6 @@ def _scan_mtimes() -> dict[str, int]:
             dirs[:] = [d for d in dirs
                        if d not in DEFAULT_IGNORE_DIRS and not d.startswith(".")]
             for f in files:
-                ext = os.path.splitext(f)[1].lower()
-                if ext in DEFAULT_IGNORE_EXTS:
-                    continue
                 p = os.path.join(root, f)
                 if _is_ignored(p):
                     continue
@@ -226,8 +282,6 @@ def _run_polling():
             last = cur
 
 
-# ---------------------------------------------------------------------------
-# idle-client reaper
 # ---------------------------------------------------------------------------
 def _reap_idle():
     while not _shutdown.is_set():
@@ -268,14 +322,12 @@ JS_PAYLOAD = (
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "myserver-live/2.21"
+    server_version = "myserver-live/2.21.8"
 
     def log_message(self, fmt, *args):
         pass
 
-    # ---- SSE ----
     def _handle_sse(self):
-        # only localhost (defense-in-depth — Nginx already enforces this)
         peer = self.client_address[0] if self.client_address else ""
         if peer not in ("127.0.0.1", "::1"):
             self.send_response(403)
@@ -411,7 +463,7 @@ def main():
     watcher.start()
 
     log(f"started: htdocs={HTDOCS_DIR} port={PORT} pid={os.getpid()} "
-        f"max_clients={MAX_CLIENTS}")
+        f"max_clients={MAX_CLIENTS} debounce={DEBOUNCE_MS}ms")
 
     try:
         while not _shutdown.is_set():
