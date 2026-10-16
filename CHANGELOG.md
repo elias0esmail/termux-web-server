@@ -1,6 +1,6 @@
 # Changelog
 
-## [2.21.1] — 2026-10-16
+## [2.21.2] — 2026-10-16
 
 ### Fixed (Critical)
 - Live Reload now uses `inotifywait` (fallback polling every 3s). No more per-second CPU hammering.
