@@ -2,7 +2,7 @@
 
 **بيئة تطوير واستضافة ويب محلية متكاملة (LEMP + Redis + أدوات إدارة) مُحسّنة خصيصاً لنظام أندرويد وتطبيق Termux.**
 
-> 🌐 **اللغة / Language:** [🇬🇧 For English Click Here (README.md)](https://www.google.com/search?q=./README.md) | 📄 **سجل التغييرات:** [اضغط هنا لفتح سجل التحديثات (CHANGELOG.md)](https://www.google.com/search?q=./CHANGELOG.md)
+> 🌐 **اللغة / Language:** [🇬🇧 For English Click Here](./README.md)<br>📄 **سجل التغييرات:** [اضغط هنا لفتح سجل التحديثات](./CHANGELOG.md)
 
 <br/>
 
@@ -17,7 +17,7 @@
 
 يقوم مشروع **MyServer** بتثبيت وإعداد وإدارة بيئة خادم ويب احترافية ومتكاملة لتطبيقات PHP على هواتف وأجهزة أندرويد باستخدام تطبيق **Termux**. يجمع المشروع بين **Nginx**، و**PHP-FPM**، و**MariaDB**، و**Redis**، ودعم شهادات **HTTPS/SSL**، ولوحة **phpMyAdmin**، ومدير المواقع المتعددة (**Virtual Hosts**)، وأداة إدارة قواعد البيانات من السطر (**Database CLI**)، وخادم التحديث التلقائي (**Live Reload**)، ونظام النسخ الاحتياطي الشامل، وأداة التشخيص الذاتي (**Doctor**)، مع إمكانية النشر المباشر للإنترنت عبر **Cloudflare Tunnel**؛ وكل ذلك داخل أداة تحكم واحدة خفيفة ومصممة خصيصاً لمراعاة قيود العمليات الفرعية في أندرويد.
 
-> **سجل الإصدارات والتحديثات:** يمكنك الاطلاع على كافة الإصلاحات الأمنية والميزات الجديدة وتحسينات أندرويد عبر فتح ملف [CHANGELOG.md](https://www.google.com/search?q=./CHANGELOG.md).
+> **سجل الإصدارات والتحديثات:** يمكنك الاطلاع على كافة الإصلاحات الأمنية والميزات الجديدة وتحسينات أندرويد عبر فتح ملف [CHANGELOG.md](./CHANGELOG.md).
 
 ## أبرز مميزات المشروع
 
@@ -277,13 +277,13 @@ adb shell settings put global settings_enable_monitor_phantom_procs false
 ## 7. معلومات المطور والروابط
 
 - **المطور:** إلياس إسماعيل (Elias M. Esmail)
-- **حساب GitHub:** [https://github.com/elias0esmail](https://www.google.com/search?q=https://github.com/elias0esmail)
-- **مستودع المشروع:** [https://github.com/elias0esmail/termux-web-server](https://www.google.com/search?q=https://github.com/elias0esmail/termux-web-server)
-- **الدليل باللغة الإنجليزية:** [README.md (English Documentation)](https://www.google.com/search?q=./README.md)
-- **سجل التغييرات والإصدارات:** [CHANGELOG.md](https://www.google.com/search?q=./CHANGELOG.md)
-- **الإبلاغ عن المشاكل والاقتراحات:** [https://github.com/elias0esmail/termux-web-server/issues](https://www.google.com/search?q=https://github.com/elias0esmail/termux-web-server/issues)
+- **حساب GitHub:** [elias0esmail](https://github.com/elias0esmail)
+- **مستودع المشروع:** [termux-web-server](https://github.com/elias0esmail/termux-web-server)
+- **الدليل باللغة الإنجليزية:** [README.md (English Documentation)](./README.md)
+- **سجل التغييرات والإصدارات:** [CHANGELOG.md](./CHANGELOG.md)
+- **الإبلاغ عن المشاكل والاقتراحات:** [https://github.com/elias0esmail/termux-web-server/issues](https://github.com/elias0esmail/termux-web-server/issues)
 - **واتساب:** `+967771902342`
 
 ## الترخيص (License)
 
-هذا المشروع مرخص تحت رخصة [MIT License](https://www.google.com/search?q=./LICENSE).
+هذا المشروع مرخص تحت رخصة [MIT License](./LICENSE).

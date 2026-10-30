@@ -2,7 +2,7 @@
 
 **A complete, Android-optimized local web development stack (LEMP + Redis + Tools) powered by Termux.**
 
-> 🌐 **Language / اللغة:** [🇸🇦 للغة العربية اضغط هنا (ARREADME.md)](https://www.google.com/search?q=./ARREADME.md) | 📄 **Release Notes:** [View Changelog (CHANGELOG.md)](https://www.google.com/search?q=./CHANGELOG.md)
+> 🌐 **Language / اللغة:** [🇸🇦 للغة العربية اضغط هنا](./ARREADME.md) <br> 📄 **Release Notes:** [View Changelog](./CHANGELOG.md)
 
 <br/>
 
@@ -17,7 +17,7 @@
 
 **MyServer** installs, configures, and manages a full-featured PHP web-server environment on Android devices using **Termux**. It integrates **Nginx**, **PHP-FPM**, **MariaDB**, **Redis**, **HTTPS/SSL**, **phpMyAdmin**, **Virtual Hosts (Multi-Site)**, a **Database CLI**, **Live Reload**, **Full-Stack Backups**, **System Diagnostics (`doctor`)**, and an optional **Cloudflare Tunnel** inside a single zero-dependency Python manager engineered around Android's strict background process limits.
 
-> **Release History & Recent Updates:** Click here to open [CHANGELOG.md](https://www.google.com/search?q=./CHANGELOG.md) and review all security fixes, new features, and Android process optimizations introduced in **v2.22.0**.
+> **Release History & Recent Updates:** Click here to open [CHANGELOG.md](./CHANGELOG.md) and review all security fixes, new features, and Android process optimizations introduced in **v2.22.0**.
 
 ## Key Features
 
@@ -44,9 +44,9 @@ Before installing MyServer, you must install **Termux** from an official, up-to-
 
 | Application | Purpose | Official Download Links |
 | :--- | :--- | :--- |
-| **Termux** *(Required)* | Core Android terminal and Linux environment | • [Download APK from GitHub Releases](https://www.google.com/search?q=https://github.com/termux/termux-app/releases)<br>• [Download from F-Droid](https://www.google.com/search?q=https://f-droid.org/en/packages/com.termux/) |
-| **Termux:API** *(Recommended)* | Enables `termux-wake-lock` to prevent Android from sleeping while the server runs | • [Download from GitHub Releases](https://www.google.com/search?q=https://github.com/termux/termux-api/releases)<br>• [Download from F-Droid](https://www.google.com/search?q=https://f-droid.org/en/packages/com.termux.api/) |
-| **Termux:Boot** *(Optional)* | Automatically starts MyServer when your Android phone boots up | • [Download from GitHub Releases](https://www.google.com/search?q=https://github.com/termux/termux-boot/releases)<br>• [Download from F-Droid](https://www.google.com/search?q=https://f-droid.org/en/packages/com.termux.boot/) |
+| **Termux** *(Required)* | Core Android terminal and Linux environment | • [Download APK from GitHub Releases](https://github.com/termux/termux-app/releases)<br>• [Download from F-Droid](https://f-droid.org/packages/com.termux/) |
+| **Termux:API** *(Recommended)* | Enables `termux-wake-lock` to prevent Android from sleeping while the server runs | • [Download from GitHub Releases](https://github.com/termux/termux-api/releases)<br>• [Download from F-Droid](https://f-droid.org/en/packages/com.termux.api/) |
+| **Termux:Boot** *(Optional)* | Automatically starts MyServer when your Android phone boots up | • [Download from GitHub Releases](https://github.com/termux/termux-boot/releases)<br>• [Download from F-Droid](https://f-droid.org/en/packages/com.termux.boot/) |
 
 *Tip: Which APK should I download from GitHub Releases?*
 - Most modern phones (2018+) use **`termux-app_vX.XX.X+..._arm64-v8a.apk`**.
@@ -155,7 +155,7 @@ Running `myserver` without arguments launches the interactive TUI menu.
 - `4) restore` — Interactive `fzf` selector to restore a backup archive.
 - `5) doctor` — Run the 38-point diagnostic check.
 - `6) ssl-info` — Inspect SSL certificate validity and SHA-256 fingerprint.
-- `7) update` — Check GitHub for newer SemVer releases and view [CHANGELOG.md](https://www.google.com/search?q=./CHANGELOG.md).
+- `7) update` — Check GitHub for newer SemVer releases and view [CHANGELOG.md](./CHANGELOG.md).
 - `8) reinstall` — Refresh configurations and phpMyAdmin while preserving all databases and `htdocs`.
 - `9) uninstall` — Permanently remove the server stack (requires typing `yes`).
 
@@ -384,13 +384,13 @@ python3 -m unittest discover -s tests -v
 ## 10. Developer & Links
 
 - **Developer:** Elias M. Esmail
-- **GitHub Profile:** [https://github.com/elias0esmail](https://www.google.com/search?q=https://github.com/elias0esmail)
-- **Repository:** [https://github.com/elias0esmail/termux-web-server](https://www.google.com/search?q=https://github.com/elias0esmail/termux-web-server)
-- **Arabic Guide:** [ARREADME.md (الدليل الشامل باللغة العربية)](https://www.google.com/search?q=./ARREADME.md)
-- **Changelog:** [CHANGELOG.md](https://www.google.com/search?q=./CHANGELOG.md)
-- **Issues & Bug Reports:** [https://github.com/elias0esmail/termux-web-server/issues](https://www.google.com/search?q=https://github.com/elias0esmail/termux-web-server/issues)
+- **GitHub Profile:** [elias0esmail](https://github.com/elias0esmail)
+- **Repository:** [termux-web-server](https://github.com/elias0esmail/termux-web-server)
+- **Arabic Guide:** [ (الدليل الشامل باللغة العربية)](./ARREADME.md)
+- **Changelog:** [CHANGELOG](CHANGELOG.md)
+- **Issues & Bug Reports:** [https://github.com/elias0esmail/termux-web-server/issues](https://github.com/elias0esmail/termux-web-server/issues)
 - **WhatsApp:** `+967771902342`
 
 ## License
 
-Released under the [MIT License](https://www.google.com/search?q=./LICENSE).
+Released under the [MIT License](./LICENSE).
