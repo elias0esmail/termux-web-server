@@ -3,9 +3,12 @@
 Key Android optimizations:
   * Commands run with `shell=False` by default (via `shlex.split`), avoiding
     an extra `/bin/sh -c` child process on every invocation.
+  * Automatic zombie reaping (`_reap_children`) ensures background processes
+    spawned from the interactive menu (`mariadbd`, `cloudflared`) never turn
+    into `<defunct>` zombies that falsely appear as running in `/proc`.
   * Process discovery (`is_process_running`, `pid_from_pgrep`, `safe_stop`)
-    inspects `/proc` and PID files directly in pure Python before falling
-    back to `pgrep`/`pkill`, eliminating dozens of transient subprocesses.
+    inspects `/proc` (ignoring `Z`/`X` zombie states and matching wrapper
+    script arguments like `mariadbd-safe`) and falls back to `pkill` if needed.
   * Network reachability (`check_internet`) and LAN IP discovery (`get_lan_ip`)
     use Python's standard `urllib.request` and `socket` modules instead of
     spawning external `curl` or `ip` processes.
@@ -109,13 +112,46 @@ def command_exists(cmd: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Pure-Python /proc inspection (avoids spawning pgrep/pkill on Android)
+# Zombie reaping & /proc inspection
 # ---------------------------------------------------------------------------
-def _iter_proc_entries() -> list[tuple[int, str, str]]:
-    """Return [(pid, comm, cmdline), ...] for processes visible in /proc.
+def _reap_children() -> None:
+    """Reap any terminated child processes spawned by this Python process.
 
-    Skips the current Python process (`os.getpid()`).
+    When services like `mariadbd` or `cloudflared` are started via
+    `subprocess.Popen` from the interactive menu and later stopped within the
+    same menu session, they stay in the kernel table as `<defunct>` zombies
+    until the parent calls `waitpid`. Reaping them immediately prevents
+    false-positive 'Still running' states.
     """
+    try:
+        while True:
+            pid, _status = os.waitpid(-1, os.WNOHANG)
+            if pid <= 0:
+                break
+    except (ChildProcessError, OSError):
+        pass
+
+
+def _is_proc_zombie(pid: int) -> bool:
+    """Return True if `/proc/<pid>/stat` indicates a Zombie ('Z') or Dead ('X') state."""
+    try:
+        stat_txt = Path(f"/proc/{pid}/stat").read_text(errors="ignore")
+        rparen = stat_txt.rfind(")")
+        if rparen != -1 and len(stat_txt) > rparen + 2:
+            state_char = stat_txt[rparen + 2]
+            return state_char in ("Z", "X", "x")
+    except Exception:
+        pass
+    return False
+
+
+def _iter_proc_entries() -> list[tuple[int, str, str]]:
+    """Return [(pid, comm, cmdline), ...] for live non-zombie processes in /proc.
+
+    Skips the current Python process (`os.getpid()`) and any zombie (`Z`/`X`)
+    processes.
+    """
+    _reap_children()
     proc_root = Path("/proc")
     if not proc_root.exists():
         return []
@@ -133,6 +169,8 @@ def _iter_proc_entries() -> list[tuple[int, str, str]]:
             try:
                 if my_uid is not None and pdir.stat().st_uid != my_uid:
                     continue
+                if _is_proc_zombie(pid):
+                    continue
                 comm = ""
                 comm_file = pdir / "comm"
                 if comm_file.exists():
@@ -142,6 +180,9 @@ def _iter_proc_entries() -> list[tuple[int, str, str]]:
                 if cmd_file.exists():
                     raw = cmd_file.read_bytes()
                     cmdline = raw.replace(b"\x00", b" ").decode("utf-8", errors="ignore").strip()
+                # If cmdline is completely empty for a user process, it's typically a zombie/kernel thread
+                if not cmdline and _is_proc_zombie(pid):
+                    continue
                 if comm or cmdline:
                     entries.append((pid, comm, cmdline))
             except (PermissionError, FileNotFoundError, ProcessLookupError, OSError):
@@ -151,33 +192,48 @@ def _iter_proc_entries() -> list[tuple[int, str, str]]:
     return entries
 
 
-def is_process_running(pattern: str, pid_file: Path | None = None) -> bool:
-    """Check if a process matching `pattern` is alive.
+def _cmdline_matches_names(comm: str, cmdline: str, name_set: set[str]) -> bool:
+    """Return True if `comm` or any executable/script path token in `cmdline` matches `name_set`.
 
-    1. Checks `pid_file` first if provided (zero subprocesses, O(1) syscall).
-    2. Scans `/proc` in pure Python (supports regex or substring patterns).
-    3. Falls back to `pgrep -f` only if `/proc` yielded no entries at all.
+    This catches both direct binaries (`mariadbd`, `cloudflared`) and shell-wrapped
+    scripts (`/data/data/com.termux/files/usr/bin/sh .../bin/mariadbd-safe ...`).
     """
+    if comm in name_set:
+        return True
+    if not cmdline:
+        return False
+    for token in cmdline.split():
+        if token.startswith("-"):
+            continue
+        base = Path(token).name
+        if base in name_set:
+            return True
+    return False
+
+
+def is_process_running(pattern: str, pid_file: Path | None = None) -> bool:
+    """Check if a live (non-zombie) process matching `pattern` is running."""
+    _reap_children()
     if pid_file is not None:
         pid = read_pid_file(pid_file)
         if pid and pid_alive(pid):
             return True
 
     entries = _iter_proc_entries()
-    if entries:
+    if len(entries) >= 1:
         try:
             rx = re.compile(pattern)
             for _pid, comm, cmdline in entries:
                 if rx.search(comm) or rx.search(cmdline):
                     return True
-            return False
         except re.error:
             for _pid, comm, cmdline in entries:
                 if pattern in comm or pattern in cmdline:
                     return True
-            return False
+        # Note: if /proc is accessible and scanned, return False without spawning pgrep
+        return False
 
-    # Fallback if /proc is restricted on a non-standard environment
+    # Fallback if /proc is restricted on this Android kernel (hidepid=2)
     r = subprocess.run(
         ["pgrep", "-f", pattern],
         stdout=subprocess.DEVNULL,
@@ -187,23 +243,25 @@ def is_process_running(pattern: str, pid_file: Path | None = None) -> bool:
 
 
 def pid_from_pgrep(pattern: str, exact: bool = False) -> int | None:
-    """Find the first matching PID using pure-Python /proc scan first."""
+    """Find the first matching live PID using pure-Python /proc scan first."""
     entries = _iter_proc_entries()
     if entries:
         for pid, comm, cmdline in entries:
             if exact:
-                if comm == pattern or (cmdline and Path(cmdline.split()[0]).name == pattern):
+                if _cmdline_matches_names(comm, cmdline, {pattern}):
                     return pid
             else:
                 if pattern in comm or pattern in cmdline:
                     return pid
-        return None
 
     try:
         flag = "-x" if exact else "-f"
         r = subprocess.run(["pgrep", flag, pattern], capture_output=True, text=True)
         if r.returncode == 0 and r.stdout.strip():
-            return int(r.stdout.strip().splitlines()[0])
+            for line in r.stdout.strip().splitlines():
+                cand = int(line.strip())
+                if cand != os.getpid() and not _is_proc_zombie(cand):
+                    return cand
     except Exception:
         pass
     return None
@@ -228,29 +286,27 @@ def process_rss_mb(pid: int | None) -> float:
 
 
 def count_user_processes() -> tuple[int, float]:
-    """Return (process_count, total_rss_mb) for the current Termux UID.
-
-    Helps monitor Android 12+ Phantom Process Killer limits (max 32).
-    """
+    """Return (process_count, total_rss_mb) for the current Termux UID."""
     entries = _iter_proc_entries()
     if not entries:
         return 1, process_rss_mb(os.getpid())
     total_rss = process_rss_mb(os.getpid())
     for pid, _comm, _cmd in entries:
         total_rss += process_rss_mb(pid)
-    # +1 to include current Python process
     return len(entries) + 1, round(total_rss, 1)
 
 
 # ---------------------------------------------------------------------------
-# PID-file based safe killing
+# PID-file based safe killing (reaps zombies + kills process groups + fallback)
 # ---------------------------------------------------------------------------
 def pid_alive(pid: int) -> bool:
+    """Return True only if `pid` exists AND is not a zombie ('Z'/'X')."""
+    _reap_children()
     try:
         os.kill(pid, 0)
-        return True
     except (OSError, ProcessLookupError):
         return False
+    return not _is_proc_zombie(pid)
 
 
 def read_pid_file(path: Path) -> int | None:
@@ -276,56 +332,85 @@ def remove_pid_file(path: Path):
         pass
 
 
+def _signal_pid_and_group(pid: int, sig: int) -> None:
+    """Send signal to `pid` and (if it is a session/group leader) its process group."""
+    my_pgid = os.getpgrp() if hasattr(os, "getpgrp") else -1
+    try:
+        pgid = os.getpgid(pid)
+        if pgid > 1 and pgid != my_pgid:
+            os.killpg(pgid, sig)
+    except Exception:
+        pass
+    try:
+        os.kill(pid, sig)
+    except Exception:
+        pass
+
+
 def safe_stop(pid_file: Path, process_names: tuple[str, ...],
-              grace: float = 2.0) -> bool:
-    """Terminate a service safely without spawning extra pkill subprocesses:
-        1. SIGTERM the exact PID from pid_file
-        2. SIGTERM any matching exact binary names in /proc
-        3. Wait up to `grace` seconds
-        4. SIGKILL any survivors
-       Returns True if the service is completely stopped afterwards.
+              grace: float = 3.0) -> bool:
+    """Terminate a service reliably on Android/Termux:
+        1. Reap any pending zombies.
+        2. Collect target PIDs from `pid_file` and `/proc` (matching both binary
+           names and shell-wrapper scripts like `mariadbd-safe`).
+        3. Send SIGTERM to target PIDs (and their process group if isolated).
+        4. Wait up to `grace` seconds while reaping dying child processes.
+        5. Send SIGKILL to any survivors.
+        6. If any matching process still exists (e.g. when Android `/proc`
+           hides sibling processes), run `pkill -x` / `pkill -f` as fallback.
     """
+    _reap_children()
     target_pids: set[int] = set()
     pid = read_pid_file(pid_file)
     if pid and pid_alive(pid):
         target_pids.add(pid)
 
-    entries = _iter_proc_entries()
     name_set = set(process_names)
-    if entries:
-        for ep, comm, cmdline in entries:
-            exe_name = Path(cmdline.split()[0]).name if cmdline else ""
-            if comm in name_set or exe_name in name_set:
-                target_pids.add(ep)
-    else:
-        # Fallback if /proc is not readable
+    for ep, comm, cmdline in _iter_proc_entries():
+        if _cmdline_matches_names(comm, cmdline, name_set):
+            target_pids.add(ep)
+
+    for tpid in list(target_pids):
+        _signal_pid_and_group(tpid, signal.SIGTERM)
+
+    if target_pids:
+        deadline = time.time() + grace
+        while time.time() < deadline:
+            _reap_children()
+            if not any(pid_alive(p) for p in target_pids):
+                break
+            time.sleep(0.15)
+
+        for tpid in list(target_pids):
+            if pid_alive(tpid):
+                _signal_pid_and_group(tpid, signal.SIGKILL)
+        time.sleep(0.2)
+        _reap_children()
+
+    # Check if any process in process_names is still running (or if target_pids was empty)
+    still_alive = [n for n in process_names if is_process_running(n)]
+    if still_alive or not target_pids:
         for name in process_names:
             subprocess.run(
                 ["pkill", "-x", name],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-
-    for tpid in list(target_pids):
-        try:
-            os.kill(tpid, signal.SIGTERM)
-        except Exception:
-            pass
-
-    if target_pids:
-        deadline = time.time() + grace
-        while time.time() < deadline:
-            if not any(pid_alive(p) for p in target_pids):
-                break
-            time.sleep(0.12)
-
-        for tpid in list(target_pids):
-            if pid_alive(tpid):
-                try:
-                    os.kill(tpid, signal.SIGKILL)
-                except Exception:
-                    pass
+        time.sleep(0.2)
+        _reap_children()
+        # Final SIGKILL sweep if anything ignored SIGTERM from pkill
+        for ep, comm, cmdline in _iter_proc_entries():
+            if _cmdline_matches_names(comm, cmdline, name_set):
+                _signal_pid_and_group(ep, signal.SIGKILL)
+        for name in process_names:
+            if is_process_running(name):
+                subprocess.run(
+                    ["pkill", "-9", "-x", name],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
         time.sleep(0.15)
+        _reap_children()
 
     remove_pid_file(pid_file)
     return not any(is_process_running(n) for n in process_names)
@@ -335,6 +420,7 @@ def safe_stop(pid_file: Path, process_names: tuple[str, ...],
 # MariaDB helpers (safe stdin execution, zero shell injection)
 # ---------------------------------------------------------------------------
 def mariadb_is_running() -> bool:
+    _reap_children()
     if is_process_running("mariadbd|mysqld", pid_file=paths.PID_MARIADB):
         return True
     for pat in ("mariadbd", "mysqld", "mariadbd-safe", "mysqld_safe"):
@@ -364,11 +450,13 @@ def run_mysql_query(sql: str,
                     batch: bool = True,
                     force: bool = False) -> subprocess.CompletedProcess:
     """Execute SQL safely via stdin with shell=False (immune to shell injection)."""
-    cmd = [
-        mysql_client(),
+    cmd = [mysql_client()]
+    if paths.MY_CNF_FILE.exists():
+        cmd.append(f"--defaults-extra-file={paths.MY_CNF_FILE}")
+    cmd.extend([
         "-u", "root",
         f"--socket={paths.MARIADB_SOCKET}",
-    ]
+    ])
     if batch:
         cmd.extend(["-N", "-B"])
     if force:
@@ -425,7 +513,6 @@ def get_lan_ip() -> str | None:
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.settimeout(0.2)
-            # Does not send any packets on the wire
             s.connect(("10.255.255.255", 1))
             ip = s.getsockname()[0]
             if ip and not ip.startswith("127."):

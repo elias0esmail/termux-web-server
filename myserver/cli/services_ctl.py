@@ -10,6 +10,7 @@ from ..features import live_reload, tunnel, wake_lock
 
 # ---------------------------------------------------------------------------
 def status() -> dict[str, bool]:
+    helpers._reap_children()
     return {
         "nginx":   helpers.is_process_running("nginx", pid_file=paths.PID_NGINX),
         "php-fpm": helpers.is_process_running("php-fpm", pid_file=paths.PID_PHP),
@@ -22,7 +23,7 @@ def status() -> dict[str, bool]:
 
 def any_running() -> bool:
     s = status()
-    return any(s[k] for k in ("nginx", "php-fpm", "mariadb", "redis"))
+    return any(s[k] for k in ("nginx", "php-fpm", "mariadb", "redis", "tunnel", "live"))
 
 
 # ---------------------------------------------------------------------------
@@ -68,7 +69,6 @@ def start_all(open_browser: bool = True) -> bool:
         ui.info("If this is wrong, run: myserver reinstall")
         return False
 
-    # Fast top-level permission check (<2ms, 0 subprocesses)
     nginx.enforce_htdocs_permissions(paths.HTDOCS_DIR, deep=False)
     wake_lock.acquire()
 
@@ -111,13 +111,13 @@ def stop_all(quiet: bool = False) -> bool:
         ui.step("Stopping all services (graceful)...")
 
     try:
-        if tunnel.is_running():
+        if tunnel.is_running() or paths.PID_TUNNEL.exists():
             tunnel.disable()
     except Exception:
         pass
 
     try:
-        if live_reload.is_running():
+        if live_reload.is_running() or paths.PID_LIVE.exists():
             live_reload.stop(quiet=True)
         else:
             paths.LIVE_CONF_FILE.write_text("")
@@ -128,6 +128,7 @@ def stop_all(quiet: bool = False) -> bool:
     nginx.stop()
     redis.stop()
     mariadb.stop_mariadb_cleanly()
+    helpers._reap_children()
 
     try:
         wake_lock.release()
@@ -135,7 +136,7 @@ def stop_all(quiet: bool = False) -> bool:
         pass
 
     s = status()
-    left = [k for k in ("nginx", "php-fpm", "mariadb", "redis") if s[k]]
+    left = [k for k in ("nginx", "php-fpm", "mariadb", "redis", "tunnel", "live") if s[k]]
     if not quiet:
         if not left:
             ui.ok("All services stopped.")

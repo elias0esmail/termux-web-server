@@ -6,8 +6,9 @@ Android Process Optimization:
     32 phantom-process limit.
   * Disables `performance_schema` and caps connections/caches to reduce thread
     and RAM overhead on mobile devices.
-  * Executes all SQL via `helpers.run_mysql_query` (`stdin` + `shell=False`),
-    eliminating shell injection and `/bin/sh` wrapper processes.
+  * Gracefully shuts down via `mariadb-admin` with `--defaults-extra-file=~/.my.cnf`
+    (so password-protected root accounts shut down cleanly), then reaps child
+    processes and cleans up any remaining `mariadbd-safe` / `mariadbd` processes.
 """
 from __future__ import annotations
 
@@ -138,7 +139,6 @@ def start_mariadb_background() -> bool:
     if helpers.mariadb_is_running():
         return True
 
-    # clean stale socket only when no server is alive
     if paths.MARIADB_SOCKET.exists():
         try:
             paths.MARIADB_SOCKET.unlink()
@@ -173,20 +173,39 @@ def start_mariadb_background() -> bool:
     return paths.MARIADB_SOCKET.exists()
 
 
-def stop_mariadb_cleanly():
-    # graceful shutdown via admin
+def stop_mariadb_cleanly() -> bool:
+    """Shut down MariaDB cleanly and ensure no watchdog or zombie remains."""
     admin_bin = helpers.mysql_admin()
     if paths.MARIADB_SOCKET.exists() and helpers.command_exists(admin_bin):
-        helpers.run_cmd([
-            admin_bin,
+        cmd = [admin_bin]
+        if paths.MY_CNF_FILE.exists():
+            cmd.append(f"--defaults-extra-file={paths.MY_CNF_FILE}")
+        cmd.extend([
+            "-u", "root",
             f"--socket={paths.MARIADB_SOCKET}",
             "shutdown",
         ])
-        time.sleep(1.5)
-    helpers.safe_stop(
+        helpers.run_cmd(cmd)
+        # Wait up to 4 seconds for MariaDB to flush tables and remove its socket
+        deadline = time.time() + 4.0
+        while time.time() < deadline:
+            helpers._reap_children()
+            if not paths.MARIADB_SOCKET.exists() and not helpers.mariadb_is_running():
+                break
+            time.sleep(0.2)
+
+    # Stop any wrapper (mariadbd-safe) FIRST so it cannot respawn mariadbd
+    ok = helpers.safe_stop(
         paths.PID_MARIADB,
-        ("mariadbd", "mysqld", "mariadbd-safe", "mysqld_safe"),
+        ("mariadbd-safe", "mysqld_safe", "mariadbd", "mysqld"),
+        grace=3.5,
     )
+    if paths.MARIADB_SOCKET.exists() and not helpers.mariadb_is_running():
+        try:
+            paths.MARIADB_SOCKET.unlink()
+        except Exception:
+            pass
+    return ok
 
 
 # ---------------------------------------------------------------------------
@@ -247,6 +266,7 @@ def repair_root_if_unix_socket():
             proc.kill()
         except Exception:
             pass
+        helpers._reap_children()
         return
     time.sleep(2)
 

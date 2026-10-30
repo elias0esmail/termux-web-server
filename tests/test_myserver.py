@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -97,12 +100,10 @@ class TestMyServerSuite(unittest.TestCase):
         self.assertFalse(helpers.is_newer_version("2.22.0", "2.21.4"))
 
     def test_safe_backup_dir_resolution(self):
-        # When ~/storage/shared does NOT exist, must use ~/myserver-backups
         paths.resolve_runtime_paths()
         self.assertEqual(paths.BACKUP_DIR, paths.HOME_BACKUP_DIR)
         self.assertFalse((paths.HOME / "storage").exists())
 
-        # When ~/storage/shared DOES exist, switches to shared storage
         (paths.HOME / "storage/shared").mkdir(parents=True, exist_ok=True)
         paths.resolve_runtime_paths()
         self.assertEqual(paths.BACKUP_DIR, paths.STORAGE_BACKUP_DIR)
@@ -147,6 +148,30 @@ class TestMyServerSuite(unittest.TestCase):
         self.assertFalse(redis.is_enabled())
         redis.set_enabled(True)
         self.assertTrue(redis.is_enabled())
+
+    def test_zombie_reaping_and_safe_stop_for_popen_children(self):
+        """Simulate starting mariadbd/cloudflared inside the menu via Popen
+        without calling proc.wait(), then stopping them via safe_stop()."""
+        dummy_script = self.tmp_dir / "fake-mariadbd-daemon"
+        dummy_script.write_text("#!/bin/sh\nsleep 30\n")
+        dummy_script.chmod(0o755)
+        pid_file = self.tmp_dir / "fake.pid"
+
+        proc = subprocess.Popen(
+            [str(dummy_script)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        helpers.write_pid_file(pid_file, proc.pid)
+        time.sleep(0.1)
+
+        self.assertTrue(helpers.is_process_running("fake-mariadbd-daemon", pid_file=pid_file))
+        stopped = helpers.safe_stop(pid_file, ("fake-mariadbd-daemon",), grace=1.5)
+        self.assertTrue(stopped)
+        self.assertFalse(helpers.pid_alive(proc.pid))
+        self.assertFalse(helpers.is_process_running("fake-mariadbd-daemon", pid_file=pid_file))
 
     def test_i18n_removed_english_only(self):
         i18n_dir = Path(__file__).resolve().parent.parent / "myserver" / "i18n"

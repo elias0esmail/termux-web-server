@@ -14,6 +14,7 @@ CLOUDFLARED_URL_RE = re.compile(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com")
 
 # ---------------------------------------------------------------------------
 def is_running() -> bool:
+    helpers._reap_children()
     return helpers.is_process_running("cloudflared", pid_file=paths.PID_TUNNEL)
 
 
@@ -43,7 +44,6 @@ def enable(port: int = 8080):
             ui.err("Failed to install cloudflared.")
             return False
 
-    # Security check: inform user about phpMyAdmin protection and root password
     ui.info("Security: /phpmyadmin and /phpinfo are automatically blocked (HTTP 403) on public tunnel requests.")
     if not mariadb.read_password_from_my_cnf():
         ui.warn("Notice: MariaDB root has no password. Local apps with exposed debug routes remain risky.")
@@ -119,20 +119,29 @@ def enable(port: int = 8080):
     return False
 
 
-def disable():
+def disable() -> bool:
     if not is_running():
+        for f in (paths.PID_TUNNEL, paths.TUNNEL_URL_FILE, paths.TUNNEL_LOG):
+            try:
+                if f.exists():
+                    f.unlink()
+            except Exception:
+                pass
         ui.info("Tunnel already disabled.")
         return True
     ui.step("Stopping Cloudflare tunnel...")
-    helpers.safe_stop(paths.PID_TUNNEL, ("cloudflared",))
+    ok = helpers.safe_stop(paths.PID_TUNNEL, ("cloudflared",), grace=2.5)
     for f in (paths.TUNNEL_URL_FILE, paths.TUNNEL_LOG):
         try:
             if f.exists():
                 f.unlink()
         except Exception:
             pass
-    ui.ok("Internet tunnel disabled.")
-    return True
+    if ok:
+        ui.ok("Internet tunnel disabled.")
+    else:
+        ui.warn("Cloudflare tunnel did not stop cleanly.")
+    return ok
 
 
 def status():
