@@ -1,15 +1,22 @@
-"""Framework installers: phpMyAdmin, WordPress, Laravel, Nextcloud."""
+"""Framework installers: phpMyAdmin, WordPress, Laravel, Nextcloud.
+
+Security & Architecture Improvements:
+  * Strictly validates project/database names via `helpers.is_safe_identifier()`
+    to block command and SQL injection.
+  * Executes all SQL statements via `helpers.run_mysql_query()` over `stdin`
+    with `shell=False`.
+  * Automatically registers a dedicated Virtual Host for Laravel projects so
+    routing works out of the box without exposing `.env` or `vendor/`.
+"""
 from __future__ import annotations
 
-import os
 import re
 import secrets
-import shutil
 import subprocess
 from pathlib import Path
 
 from ..core import paths, helpers, ui
-from ..services import mariadb
+from . import vhost
 
 
 # ===========================================================================
@@ -40,20 +47,20 @@ $cfg['Servers'][$i]['export_templates'] = 'pma__export_templates';
 
 
 def _setup_pma_storage(pma_dir: Path) -> bool:
-    sql = pma_dir / "sql" / "create_tables.sql"
-    if not sql.exists() or not paths.MARIADB_SOCKET.exists():
+    sql_file = pma_dir / "sql" / "create_tables.sql"
+    if not sql_file.exists() or not paths.MARIADB_SOCKET.exists():
         return False
-    cli = helpers.mysql_client()
-    helpers.run_cmd_capture(
-        f"{cli} -u root --socket='{paths.MARIADB_SOCKET}' -e "
-        f"\"CREATE DATABASE IF NOT EXISTS phpmyadmin "
-        f"DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;\"")
-    helpers.run_cmd_capture(
-        f"{cli} -u root --socket='{paths.MARIADB_SOCKET}' --force phpmyadmin < '{sql}'")
-    r = helpers.run_cmd_capture(
-        f"{cli} -u root --socket='{paths.MARIADB_SOCKET}' -N -B -e "
-        f"\"SHOW TABLES FROM phpmyadmin LIKE 'pma\\\\_%';\"")
-    return len([ln for ln in r.stdout.splitlines() if ln.strip()]) >= 15
+    helpers.run_mysql_query(
+        "CREATE DATABASE IF NOT EXISTS phpmyadmin "
+        "DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+    )
+    try:
+        sql_text = sql_file.read_text(errors="ignore")
+        helpers.run_mysql_query(sql_text, database="phpmyadmin", batch=False, force=True, timeout=30)
+    except Exception:
+        return False
+    r = helpers.run_mysql_query("SHOW TABLES FROM phpmyadmin LIKE 'pma\\_%';")
+    return len([ln for ln in (r.stdout or "").splitlines() if ln.strip()]) >= 15
 
 
 def _patch_pma_config(cfg: Path):
@@ -77,8 +84,11 @@ def install_phpmyadmin(htdocs: Path, db_password: str) -> bool:
         tar_file = paths.TMP_DIR / "pma.tar.gz"
         url = "https://www.phpmyadmin.net/downloads/phpMyAdmin-latest-all-languages.tar.gz"
 
-        r = subprocess.run(["curl", "-fsSL", url, "-o", str(tar_file)],
-                           capture_output=True, text=True)
+        r = subprocess.run(
+            ["curl", "-fsSL", url, "-o", str(tar_file)],
+            capture_output=True,
+            text=True,
+        )
         if r.returncode != 0 or not tar_file.exists() or tar_file.stat().st_size == 0:
             ui.err("Failed to download phpMyAdmin.")
             return False
@@ -89,7 +99,9 @@ def install_phpmyadmin(htdocs: Path, db_password: str) -> bool:
         pma_dir.mkdir(parents=True, exist_ok=True)
         r = subprocess.run(
             ["tar", "-xf", str(tar_file), "-C", str(pma_dir), "--strip-components=1"],
-            capture_output=True, text=True)
+            capture_output=True,
+            text=True,
+        )
         if r.returncode != 0:
             ui.err(f"tar failed: {r.stderr[:200]}")
             return False
@@ -103,16 +115,22 @@ def install_phpmyadmin(htdocs: Path, db_password: str) -> bool:
             content = sample.read_text()
             content = re.sub(
                 r"\$cfg\['blowfish_secret'\]\s*=\s*'';|\$cfg\['blowfish_secret'\]\s*=\s*\".*\";",
-                f"$cfg['blowfish_secret'] = '{secret}';", content)
+                f"$cfg['blowfish_secret'] = '{secret}';",
+                content,
+            )
             allow = "true" if not db_password else "false"
             content = re.sub(
                 r"\$cfg\['Servers'\]\[\$i\]\['AllowNoPassword'\]\s*=\s*(true|false);",
-                f"$cfg['Servers'][$i]['AllowNoPassword'] = {allow};", content)
+                f"$cfg['Servers'][$i]['AllowNoPassword'] = {allow};",
+                content,
+            )
             if "AllowNoPassword" not in content:
                 content += f"\n$cfg['Servers'][$i]['AllowNoPassword'] = {allow};\n"
             content = re.sub(
                 r"\$cfg\['Servers'\]\[\$i\]\['host'\]\s*=\s*'localhost';",
-                "$cfg['Servers'][$i]['host'] = '127.0.0.1';", content)
+                "$cfg['Servers'][$i]['host'] = '127.0.0.1';",
+                content,
+            )
             pma_tmp = pma_dir / "tmp"
             pma_tmp.mkdir(exist_ok=True)
             content += f"\n$cfg['TempDir'] = '{pma_tmp}';\n"
@@ -142,23 +160,27 @@ def install_wordpress(htdocs: Path) -> bool:
     tar_file = paths.TMP_DIR / "wordpress.tar.gz"
     r = subprocess.run(
         ["curl", "-fsSL", "https://wordpress.org/latest.tar.gz", "-o", str(tar_file)],
-        capture_output=True, text=True)
+        capture_output=True,
+        text=True,
+    )
     if r.returncode != 0 or not tar_file.exists():
         ui.err("Download failed.")
         return False
-    r = subprocess.run(["tar", "-xf", str(tar_file), "-C", str(htdocs)],
-                       capture_output=True, text=True)
+    r = subprocess.run(
+        ["tar", "-xf", str(tar_file), "-C", str(htdocs)],
+        capture_output=True,
+        text=True,
+    )
     tar_file.unlink(missing_ok=True)
     if r.returncode != 0:
         ui.err(f"Extraction failed: {r.stderr[:200]}")
         return False
 
     if paths.MARIADB_SOCKET.exists():
-        cli = helpers.mysql_client()
-        helpers.run_cmd_capture(
-            f"{cli} -u root --socket='{paths.MARIADB_SOCKET}' -e "
-            f"\"CREATE DATABASE IF NOT EXISTS wordpress "
-            f"DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;\"")
+        helpers.run_mysql_query(
+            "CREATE DATABASE IF NOT EXISTS `wordpress` "
+            "DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+        )
     ui.ok("WordPress installed → http://localhost:8080/wordpress")
     return True
 
@@ -167,13 +189,18 @@ def install_wordpress(htdocs: Path) -> bool:
 # Laravel
 # ===========================================================================
 def install_laravel(htdocs: Path, name: str = "laravel") -> bool:
+    name = name.strip()
+    if not helpers.is_safe_identifier(name):
+        ui.err("Invalid project name. Use only letters, numbers, '-' or '_'.")
+        return False
+
     target = htdocs / name
     if target.exists():
         ui.err(f"{target} already exists.")
         return False
     if not helpers.command_exists("composer"):
         ui.warn("Installing composer...")
-        helpers.run_cmd("pkg install -y composer")
+        helpers.run_cmd(["pkg", "install", "-y", "composer"])
     if not helpers.command_exists("composer"):
         ui.err("composer not available.")
         return False
@@ -183,19 +210,22 @@ def install_laravel(htdocs: Path, name: str = "laravel") -> bool:
         ["composer", "create-project", "--prefer-dist",
          "--no-interaction", "--no-progress",
          "laravel/laravel", str(target)],
-        capture_output=True, text=True)
+        capture_output=True,
+        text=True,
+    )
     if r.returncode != 0:
         ui.err(f"composer failed: {r.stderr[:300]}")
         return False
 
     db = name.replace("-", "_")
-    if paths.MARIADB_SOCKET.exists():
-        cli = helpers.mysql_client()
-        helpers.run_cmd_capture(
-            f"{cli} -u root --socket='{paths.MARIADB_SOCKET}' -e "
-            f"\"CREATE DATABASE IF NOT EXISTS `{db}` "
-            f"DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;\"")
+    if paths.MARIADB_SOCKET.exists() and helpers.is_safe_identifier(db):
+        helpers.run_mysql_query(
+            f"CREATE DATABASE IF NOT EXISTS `{db}` "
+            "DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+        )
+
     ui.ok(f"Laravel installed → http://localhost:8080/{name}/public")
+    vhost.add_site(name, project_path=target, site_type="laravel")
     return True
 
 
@@ -208,19 +238,25 @@ def install_nextcloud(htdocs: Path) -> bool:
         ui.err(f"{target} already exists.")
         return False
     if not helpers.command_exists("unzip"):
-        helpers.run_cmd("pkg install -y unzip")
+        helpers.run_cmd(["pkg", "install", "-y", "unzip"])
     ui.step("Downloading Nextcloud...")
     paths.TMP_DIR.mkdir(parents=True, exist_ok=True)
     zip_file = paths.TMP_DIR / "nextcloud.zip"
     r = subprocess.run(
         ["curl", "-fsSL",
          "https://download.nextcloud.com/server/releases/latest.zip",
-         "-o", str(zip_file)], capture_output=True, text=True)
+         "-o", str(zip_file)],
+        capture_output=True,
+        text=True,
+    )
     if r.returncode != 0 or not zip_file.exists():
         ui.err("Download failed.")
         return False
-    r = subprocess.run(["unzip", "-q", str(zip_file), "-d", str(htdocs)],
-                       capture_output=True, text=True)
+    r = subprocess.run(
+        ["unzip", "-q", str(zip_file), "-d", str(htdocs)],
+        capture_output=True,
+        text=True,
+    )
     zip_file.unlink(missing_ok=True)
     if r.returncode != 0:
         ui.err(f"Unzip failed: {r.stderr[:200]}")
@@ -229,23 +265,23 @@ def install_nextcloud(htdocs: Path) -> bool:
     db_user = "ncuser"
     db_pass = secrets.token_urlsafe(16)
     if paths.MARIADB_SOCKET.exists():
-        cli = helpers.mysql_client()
+        escaped_pw = helpers.sql_escape(db_pass)
         sql = (
-            "CREATE DATABASE IF NOT EXISTS nextcloud "
-            "DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
-            f"CREATE USER IF NOT EXISTS '{db_user}'@'127.0.0.1' IDENTIFIED BY '{db_pass}';"
-            f"CREATE USER IF NOT EXISTS '{db_user}'@'localhost' IDENTIFIED BY '{db_pass}';"
-            f"GRANT ALL PRIVILEGES ON nextcloud.* TO '{db_user}'@'127.0.0.1';"
-            f"GRANT ALL PRIVILEGES ON nextcloud.* TO '{db_user}'@'localhost';"
-            "FLUSH PRIVILEGES;"
+            "CREATE DATABASE IF NOT EXISTS `nextcloud` "
+            "DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;\n"
+            f"CREATE USER IF NOT EXISTS '{db_user}'@'127.0.0.1' IDENTIFIED BY '{escaped_pw}';\n"
+            f"CREATE USER IF NOT EXISTS '{db_user}'@'localhost' IDENTIFIED BY '{escaped_pw}';\n"
+            f"GRANT ALL PRIVILEGES ON `nextcloud`.* TO '{db_user}'@'127.0.0.1';\n"
+            f"GRANT ALL PRIVILEGES ON `nextcloud`.* TO '{db_user}'@'localhost';\n"
+            "FLUSH PRIVILEGES;\n"
         )
-        helpers.run_cmd_capture(
-            f"{cli} -u root --socket='{paths.MARIADB_SOCKET}' -e \"{sql}\"")
+        helpers.run_mysql_query(sql, batch=False)
         ui.ok("Nextcloud installed.")
         ui.info(f"DB user: {db_user}")
         ui.info(f"DB pass: {db_pass}   (save this!)")
     else:
         ui.warn("MariaDB not running — no DB created.")
+    vhost.add_site("nextcloud", project_path=target, site_type="nextcloud")
     return True
 
 
@@ -260,8 +296,8 @@ def menu(htdocs: Path, db_password: str = "") -> None:
         print(f"{ui.C_MAGENTA}      QUICKSTART FRAMEWORK INSTALLER        {ui.C_RESET}")
         print(f"{ui.C_MAGENTA}============================================{ui.C_RESET}")
         print(" 1) Install WordPress")
-        print(" 2) Install Laravel")
-        print(" 3) Install Nextcloud")
+        print(" 2) Install Laravel (with dedicated VHost)")
+        print(" 3) Install Nextcloud (with dedicated VHost)")
         print(" 4) Reinstall phpMyAdmin")
         print(" 5) Back")
         try:
@@ -270,16 +306,18 @@ def menu(htdocs: Path, db_password: str = "") -> None:
             return
         if choice == "1":
             install_wordpress(htdocs)
+            ngx.enforce_htdocs_permissions(htdocs / "wordpress", deep=True)
         elif choice == "2":
             try:
                 name = input(f"{ui.C_YELLOW}Project name [laravel]: {ui.C_RESET}").strip() or "laravel"
             except (EOFError, KeyboardInterrupt):
                 return
-            install_laravel(htdocs, name)
+            if install_laravel(htdocs, name):
+                ngx.enforce_htdocs_permissions(htdocs / name, deep=True)
         elif choice == "3":
-            install_nextcloud(htdocs)
+            if install_nextcloud(htdocs):
+                ngx.enforce_htdocs_permissions(htdocs / "nextcloud", deep=True)
         elif choice == "4":
             install_phpmyadmin(htdocs, db_password)
         elif choice == "5":
             return
-        ngx.enforce_htdocs_permissions(htdocs)

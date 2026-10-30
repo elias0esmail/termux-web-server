@@ -7,18 +7,7 @@ myserver-live — Live Reload helper for Termux Web Server.
 - 500ms debounce on file changes.
 - Honors .myserver-ignore at the watched root.
 - Reacts ONLY to real writes (MODIFY, CLOSE_WRITE, CREATE, DELETE, MOVE_*).
-  Read-only events (OPEN, ACCESS, CLOSE_NOWRITE) are ignored — this is
-  critical for apps that re-read their own files on every request.
-- Ignores only genuinely non-editable paths:
-    * VCS:        .git, .svn, .hg
-    * Editors:    .idea, .vscode, .vs
-    * Deps:       node_modules, vendor, bower_components
-    * Runtime:    __pycache__, .myserver-cache
-    * Tool:       phpmyadmin
-  and by extension/name:
-    * *.log *.tmp *.temp *.swp *.swo *.lock *.pid *.sess *.session
-    * sess_*  .~lock.*
-- SSE clients capped at MYSERVER_LIVE_MAX_CLIENTS (default 50).
+- SSE clients capped at MYSERVER_LIVE_MAX_CLIENTS (default 10 for Android).
 - Idle clients auto-disconnected after 90s without ping.
 - Binds to 127.0.0.1 only.
 """
@@ -41,49 +30,32 @@ PORT          = int(sys.argv[2]) if len(sys.argv) > 2 else 35730
 PID_FILE      = Path(sys.argv[3]) if len(sys.argv) > 3 else Path("/tmp/myserver-live.pid")
 LOG_FILE      = Path(sys.argv[4]) if len(sys.argv) > 4 else Path("/tmp/myserver-live.log")
 
-MAX_CLIENTS   = int(os.environ.get("MYSERVER_LIVE_MAX_CLIENTS", "50"))
+MAX_CLIENTS   = int(os.environ.get("MYSERVER_LIVE_MAX_CLIENTS", "10"))
 IDLE_TIMEOUT  = 90        # seconds
 DEBOUNCE_MS   = 500       # coalesce bursts of events
 POLL_FALLBACK = 3.0       # seconds
 IGNORE_FILE   = HTDOCS_DIR / ".myserver-ignore"
 
-# ---------------------------------------------------------------------------
-# Event whitelist: only these inotify events mean "the file actually changed".
-# Everything else (OPEN, ACCESS, CLOSE_NOWRITE, ISDIR, ...) is noise from
-# apps that re-read their own files on every request.
-# ---------------------------------------------------------------------------
 RELOAD_EVENTS = {
     "MODIFY",
-    "CLOSE_WRITE",     # most editors and PHP tools write then close
+    "CLOSE_WRITE",
     "CREATE",
     "DELETE",
     "MOVED_TO",
     "MOVED_FROM",
     "MOVE",
-    "ATTRIB",          # chmod / chown can matter for PHP
+    "ATTRIB",
 }
 
-# ---------------------------------------------------------------------------
-# Directory name blocklist. Kept SHORT: only include names that cannot
-# contain files a developer would legitimately edit.
-# Per-project silences belong in .myserver-ignore, not here.
-# ---------------------------------------------------------------------------
 DEFAULT_IGNORE_DIRS = {
-    # VCS
     ".git", ".svn", ".hg",
-    # Editors
     ".idea", ".vscode", ".vs",
-    # Dependencies (huge, never edited by hand)
     "node_modules", "vendor", "bower_components",
-    # Python cache
     "__pycache__",
-    # Our own runtime cache
     ".myserver-cache",
-    # phpMyAdmin: writes tmp/ and sessions on every request
     "phpmyadmin",
 }
 
-# File extensions that never trigger reload.
 DEFAULT_IGNORE_EXTS = {
     ".log", ".tmp", ".temp",
     ".swp", ".swo",
@@ -91,7 +63,6 @@ DEFAULT_IGNORE_EXTS = {
     ".sess", ".session",
 }
 
-# Filename prefixes that never trigger reload.
 DEFAULT_IGNORE_PREFIXES = (
     "sess_",
     ".~lock.",
@@ -145,22 +116,18 @@ def _is_ignored(path: str) -> bool:
     rel_fwd = rel.replace(os.sep, "/")
     basename = os.path.basename(rel_fwd)
 
-    # --- extension filter ---
     ext = os.path.splitext(basename)[1].lower()
     if ext in DEFAULT_IGNORE_EXTS:
         return True
 
-    # --- filename prefix filter (sess_xxx, .~lock.xxx) ---
     for prefix in DEFAULT_IGNORE_PREFIXES:
         if basename.startswith(prefix):
             return True
 
-    # --- user-supplied patterns from .myserver-ignore ---
     for pat in _ignore_patterns:
         if fnmatch.fnmatch(rel_fwd, pat) or fnmatch.fnmatch("/" + rel_fwd, pat):
             return True
 
-    # --- built-in directory filter ---
     parts = rel_fwd.split("/")
     for part in parts[:-1]:
         if part in DEFAULT_IGNORE_DIRS:
@@ -172,33 +139,17 @@ def _is_ignored(path: str) -> bool:
 
 
 def _should_reload(event_str: str, path: str) -> bool:
-    """Decide whether an inotify event + path should trigger a reload.
-
-    Only writes matter — reads (OPEN, ACCESS, CLOSE_NOWRITE) are noise
-    from apps that poll their own files.
-    """
-    # 1) event whitelist
     events = {e.strip() for e in event_str.split(",")}
     if not (events & RELOAD_EVENTS):
         return False
-
-    # 2) skip if the event is only ISDIR (dir metadata, not file content)
     if events == {"ISDIR"}:
         return False
-
-    # 3) path blacklist / .myserver-ignore
     if _is_ignored(path):
         return False
-
     return True
 
 
 def _build_inotify_exclude_regex() -> str:
-    """Build an --exclude regex for inotifywait.
-
-    Directory names are anchored to '/' boundaries so names like
-    'tmp-project' do not falsely match 'tmp'.
-    """
     dirs = "|".join(
         _re.escape(d) for d in sorted(DEFAULT_IGNORE_DIRS, key=len, reverse=True)
     )
@@ -267,8 +218,12 @@ def _run_inotify():
     while not _shutdown.is_set():
         try:
             proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                text=True, bufsize=1)
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                bufsize=1,
+            )
         except Exception as e:
             log(f"inotifywait spawn failed: {e} — falling back to polling")
             return _run_polling()
@@ -309,7 +264,6 @@ def _run_inotify():
 
 # ---------------------------------------------------------------------------
 def _scan_mtimes() -> dict[str, int]:
-    """Polling fallback: mtime-based; ignores read-only events by design."""
     result: dict[str, int] = {}
     try:
         for root, dirs, files in os.walk(HTDOCS_DIR):
@@ -382,7 +336,7 @@ JS_PAYLOAD = (
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "myserver-live/2.21.11"
+    server_version = "myserver-live/2.22.0"
 
     def log_message(self, fmt, *args):
         pass

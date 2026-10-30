@@ -1,4 +1,14 @@
-"""MariaDB lifecycle: install, start, stop, password mgmt, safe repair."""
+"""MariaDB lifecycle: install, start, stop, password mgmt, safe repair.
+
+Android Process Optimization:
+  * Launches `mariadbd` directly (`shell=False`) instead of the `mariadbd-safe`
+    shell wrapper, saving 1 persistent background process against Android 12+'s
+    32 phantom-process limit.
+  * Disables `performance_schema` and caps connections/caches to reduce thread
+    and RAM overhead on mobile devices.
+  * Executes all SQL via `helpers.run_mysql_query` (`stdin` + `shell=False`),
+    eliminating shell injection and `/bin/sh` wrapper processes.
+"""
 from __future__ import annotations
 
 import getpass
@@ -8,6 +18,9 @@ import time
 from pathlib import Path
 
 from ..core import paths, helpers, ui
+
+SYSTEM_DBS = ("mysql", "information_schema", "performance_schema", "sys")
+
 
 # ---------------------------------------------------------------------------
 # .my.cnf
@@ -53,6 +66,32 @@ def read_password_from_my_cnf() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Database listing (shared across backup, uninstall, and db_cli)
+# ---------------------------------------------------------------------------
+def list_user_databases(quiet: bool = False) -> list[str]:
+    """Return user databases (excluding system schemas) via information_schema."""
+    sql = (
+        "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA "
+        "WHERE SCHEMA_NAME NOT IN "
+        "('mysql','information_schema','performance_schema','sys');"
+    )
+    r = helpers.run_mysql_query(sql, timeout=15, batch=True)
+    if r.returncode != 0:
+        if not quiet:
+            err = (r.stderr or "").strip().splitlines()
+            ui.warn(f"DB list failed: {err[0][:200] if err else 'unknown error'}")
+        return []
+
+    dbs = [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
+    if not quiet:
+        if dbs:
+            ui.info(f"Found {len(dbs)} user database(s): {', '.join(dbs)}")
+        else:
+            ui.info("No user databases found.")
+    return dbs
+
+
+# ---------------------------------------------------------------------------
 # interactive
 # ---------------------------------------------------------------------------
 def ask_db_password() -> str:
@@ -84,6 +123,14 @@ def ask_db_password() -> str:
 # ---------------------------------------------------------------------------
 # lifecycle
 # ---------------------------------------------------------------------------
+def _mariadb_daemon_binary() -> str:
+    if helpers.command_exists("mariadbd"):
+        return "mariadbd"
+    if helpers.command_exists("mysqld"):
+        return "mysqld"
+    return "mariadbd-safe"
+
+
 def start_mariadb_background() -> bool:
     paths.MYSQL_DATA_DIR.mkdir(parents=True, exist_ok=True)
     paths.MYSQL_RUN_DIR.mkdir(parents=True, exist_ok=True)
@@ -98,15 +145,25 @@ def start_mariadb_background() -> bool:
         except Exception:
             pass
 
-    if helpers.command_exists("mariadbd-safe"):
-        cmd = (f"mariadbd-safe --datadir='{paths.MYSQL_DATA_DIR}' "
-               f"--socket='{paths.MARIADB_SOCKET}'")
-    else:
-        cmd = (f"mariadbd --datadir='{paths.MYSQL_DATA_DIR}' "
-               f"--socket='{paths.MARIADB_SOCKET}'")
+    daemon_bin = _mariadb_daemon_binary()
+    cmd = [
+        daemon_bin,
+        f"--datadir={paths.MYSQL_DATA_DIR}",
+        f"--socket={paths.MARIADB_SOCKET}",
+        f"--pid-file={paths.PID_MARIADB}",
+        "--bind-address=127.0.0.1",
+        "--max-connections=25",
+        "--table-open-cache=128",
+        "--performance-schema=OFF",
+    ]
 
-    proc = subprocess.Popen(cmd, shell=True,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+    )
     helpers.write_pid_file(paths.PID_MARIADB, proc.pid)
 
     for _ in range(15):
@@ -118,12 +175,18 @@ def start_mariadb_background() -> bool:
 
 def stop_mariadb_cleanly():
     # graceful shutdown via admin
-    if paths.MARIADB_SOCKET.exists() and helpers.command_exists(helpers.mysql_admin()):
-        helpers.run_cmd(
-            f"{helpers.mysql_admin()} --socket='{paths.MARIADB_SOCKET}' shutdown")
+    admin_bin = helpers.mysql_admin()
+    if paths.MARIADB_SOCKET.exists() and helpers.command_exists(admin_bin):
+        helpers.run_cmd([
+            admin_bin,
+            f"--socket={paths.MARIADB_SOCKET}",
+            "shutdown",
+        ])
         time.sleep(1.5)
-    helpers.safe_stop(paths.PID_MARIADB,
-                      ("mariadbd-safe", "mysqld_safe", "mariadbd", "mysqld"))
+    helpers.safe_stop(
+        paths.PID_MARIADB,
+        ("mariadbd", "mysqld", "mariadbd-safe", "mysqld_safe"),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -135,14 +198,11 @@ def _port_3306_is_listening() -> bool:
 
 def repair_root_if_unix_socket():
     """Fix root@localhost that was left on unix_socket auth.
-       The repair always runs with --skip-networking to avoid exposing
+       Runs with --skip-networking and --skip-bind-address to avoid exposing
        a no-auth MySQL on the network."""
     if not paths.MARIADB_SOCKET.exists():
         return
-    cli = helpers.mysql_client()
-    r = helpers.run_cmd_capture(
-        f"{cli} -u root --socket='{paths.MARIADB_SOCKET}' -e 'SELECT 1;'",
-        timeout=10)
+    r = helpers.run_mysql_query("SELECT 1;", timeout=10)
     if r.returncode == 0:
         return
     err = (r.stderr or "").lower()
@@ -158,18 +218,23 @@ def repair_root_if_unix_socket():
         start_mariadb_background()
         return
 
-    # IMPORTANT: --skip-networking AND --skip-bind-address for safety
-    if helpers.command_exists("mariadbd-safe"):
-        cmd = (f"mariadbd-safe --skip-grant-tables --skip-networking "
-               f"--skip-bind-address "
-               f"--datadir='{paths.MYSQL_DATA_DIR}' --socket='{paths.MARIADB_SOCKET}'")
-    else:
-        cmd = (f"mariadbd --skip-grant-tables --skip-networking "
-               f"--skip-bind-address "
-               f"--datadir='{paths.MYSQL_DATA_DIR}' --socket='{paths.MARIADB_SOCKET}'")
+    daemon_bin = _mariadb_daemon_binary()
+    cmd = [
+        daemon_bin,
+        "--skip-grant-tables",
+        "--skip-networking",
+        "--skip-bind-address",
+        f"--datadir={paths.MYSQL_DATA_DIR}",
+        f"--socket={paths.MARIADB_SOCKET}",
+    ]
 
-    proc = subprocess.Popen(cmd, shell=True,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+    )
     ok = False
     for _ in range(15):
         if paths.MARIADB_SOCKET.exists():
@@ -192,23 +257,20 @@ def repair_root_if_unix_socket():
 
     fix_sql = (
         "UPDATE mysql.user SET plugin='mysql_native_password' "
-        "WHERE User='root' AND Host='localhost';"
+        "WHERE User='root' AND Host='localhost';\n"
         "UPDATE mysql.user SET Password='' "
-        "WHERE User='root' AND Host='localhost';"
+        "WHERE User='root' AND Host='localhost';\n"
         "UPDATE mysql.user SET authentication_string='' "
-        "WHERE User='root' AND Host='localhost';"
-        "FLUSH PRIVILEGES;"
+        "WHERE User='root' AND Host='localhost';\n"
+        "FLUSH PRIVILEGES;\n"
     )
-    helpers.run_cmd_capture(
-        f"{cli} -u root --socket='{paths.MARIADB_SOCKET}' -e \"{fix_sql}\"")
+    helpers.run_mysql_query(fix_sql, batch=False)
 
     stop_mariadb_cleanly()
     time.sleep(2)
 
     if start_mariadb_background():
-        r = helpers.run_cmd_capture(
-            f"{cli} -u root --socket='{paths.MARIADB_SOCKET}' -e 'SELECT 1;'",
-            timeout=10)
+        r = helpers.run_mysql_query("SELECT 1;", timeout=10)
         if r.returncode == 0:
             ui.ok("Root authentication repaired successfully.")
         else:
@@ -231,9 +293,11 @@ def setup(_htdocs: Path, db_password: str, reinstall: bool) -> bool:
 
         fresh = not (paths.MYSQL_DATA_DIR / "mysql").exists()
         if fresh:
-            helpers.run_cmd(
-                f"mariadb-install-db --auth-root-authentication-method=normal "
-                f"--datadir='{paths.MYSQL_DATA_DIR}'")
+            helpers.run_cmd([
+                "mariadb-install-db",
+                "--auth-root-authentication-method=normal",
+                f"--datadir={paths.MYSQL_DATA_DIR}",
+            ])
             ui.ok("MariaDB database initialized (normal auth).")
         else:
             ui.info("Existing MariaDB data detected — preserving databases.")
@@ -243,18 +307,16 @@ def setup(_htdocs: Path, db_password: str, reinstall: bool) -> bool:
             return False
 
         repair_root_if_unix_socket()
-        cli = helpers.mysql_client()
 
         if paths.MARIADB_SOCKET.exists():
             sec_sql = (
-                "DROP USER IF EXISTS ''@'localhost';"
-                "DROP USER IF EXISTS ''@'%';"
-                "DROP USER IF EXISTS 'root'@'%';"
-                "DROP DATABASE IF EXISTS test;"
-                "FLUSH PRIVILEGES;"
+                "DROP USER IF EXISTS ''@'localhost';\n"
+                "DROP USER IF EXISTS ''@'%';\n"
+                "DROP USER IF EXISTS 'root'@'%';\n"
+                "DROP DATABASE IF EXISTS test;\n"
+                "FLUSH PRIVILEGES;\n"
             )
-            r = helpers.run_cmd_capture(
-                f"{cli} -u root --socket='{paths.MARIADB_SOCKET}' -e \"{sec_sql}\"")
+            r = helpers.run_mysql_query(sec_sql, batch=False)
             if r.returncode == 0:
                 ui.ok("MariaDB Security Hardening applied.")
             else:
@@ -268,18 +330,12 @@ def setup(_htdocs: Path, db_password: str, reinstall: bool) -> bool:
         write_my_cnf("", paths.MARIADB_SOCKET)
 
         if db_password:
-            tmp = paths.TMP_DIR / "myserver_setpw.sql"
-            paths.TMP_DIR.mkdir(parents=True, exist_ok=True)
             escaped = helpers.sql_escape(db_password)
-            tmp.write_text(
+            pw_sql = (
                 f"ALTER USER 'root'@'localhost' IDENTIFIED BY '{escaped}';\n"
-                "FLUSH PRIVILEGES;\n")
-            r = helpers.run_cmd_capture(
-                f"{cli} -u root --socket='{paths.MARIADB_SOCKET}' < '{tmp}'")
-            try:
-                tmp.unlink()
-            except Exception:
-                pass
+                "FLUSH PRIVILEGES;\n"
+            )
+            r = helpers.run_mysql_query(pw_sql, batch=False)
             if r.returncode == 0:
                 write_my_cnf(db_password, paths.MARIADB_SOCKET)
                 ui.ok("MariaDB root password set.")
@@ -287,9 +343,10 @@ def setup(_htdocs: Path, db_password: str, reinstall: bool) -> bool:
                 ui.warn("Password note: " +
                         ((r.stderr or "unknown").strip().splitlines() or ["?"])[0][:200])
         else:
-            r = helpers.run_cmd_capture(
-                f"{cli} -u root --socket='{paths.MARIADB_SOCKET}' -e "
-                f"\"ALTER USER 'root'@'localhost' IDENTIFIED BY ''; FLUSH PRIVILEGES;\"")
+            r = helpers.run_mysql_query(
+                "ALTER USER 'root'@'localhost' IDENTIFIED BY '';\nFLUSH PRIVILEGES;\n",
+                batch=False,
+            )
             if r.returncode == 0:
                 ui.info("MariaDB root has no password.")
             else:

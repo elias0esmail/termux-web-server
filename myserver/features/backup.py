@@ -5,20 +5,7 @@ Archive layout:
     htdocs/...                                  (user data + phpMyAdmin config)
     mysql/all-databases.sql                     (user databases only)
     ssl/{server.crt,server.key,custom.?}        (SSL certificates)
-    config/{nginx.conf,www.conf,php.ini,my.cnf}
-
-Design notes:
-    * phpMyAdmin is treated as a *tool*, not user data. Its binary tree
-      (vendor/, libraries/, setup/, etc.) is excluded from backups to keep
-      archives small. Only htdocs/phpmyadmin/config.inc.php is preserved.
-      On restore, phpMyAdmin is reinstalled fresh from upstream, then the
-      saved config.inc.php is written back. This guarantees the latest
-      secure version after every restore.
-    * System databases (mysql, information_schema, ...) are excluded from
-      the dump so restores do not clobber server users.
-    * Database listing uses information_schema.SCHEMATA (reliable on all
-      MariaDB/MySQL versions) instead of SHOW DATABASES WHERE (which
-      silently returns zero rows on some MariaDB builds).
+    config/{nginx.conf,www.conf,php.ini,99-myserver.ini,my.cnf,conf.d/}
 """
 from __future__ import annotations
 
@@ -35,15 +22,13 @@ from ..core import paths, helpers, ui
 from ..services import mariadb
 
 
-MANIFEST_VERSION = 1
-SYSTEM_DBS = ("mysql", "information_schema", "performance_schema", "sys")
+MANIFEST_VERSION = 2
+SYSTEM_DBS = mariadb.SYSTEM_DBS
 
 # phpMyAdmin paths (relative to htdocs)
 PMA_DIRNAME   = "phpmyadmin"
-PMA_KEEP_ONLY = {"config.inc.php"}   # ← only this file survives backup
+PMA_KEEP_ONLY = {"config.inc.php"}   # only this file survives backup
 
-# Minimum size (bytes) for a SQL dump to be considered "meaningful".
-# Anything below this is treated as "no databases" and skipped on restore.
 MIN_SQL_DUMP_SIZE = 200
 
 
@@ -53,53 +38,18 @@ def _timestamp() -> str:
 
 
 def _read_version() -> str:
-    try:
-        return paths.VERSION_FILE.read_text().strip() or "unknown"
-    except Exception:
-        return "unknown"
+    return helpers.read_version()
 
 
-# ---------------------------------------------------------------------------
 def _list_user_databases() -> list[str]:
-    """Return user databases (excluding system schemas).
-
-    Uses information_schema.SCHEMATA, NOT `SHOW DATABASES WHERE Database
-    NOT IN (...)`. The latter returns zero rows silently on many MariaDB
-    versions because the column name is case-sensitive and its availability
-    varies. information_schema.SCHEMATA works reliably on all versions.
-    """
-    cli = helpers.mysql_client()
-    r = helpers.run_cmd_capture(
-        f"{cli} -u root --socket='{paths.MARIADB_SOCKET}' -N -B -e "
-        f"\"SELECT SCHEMA_NAME FROM information_schema.SCHEMATA "
-        f"WHERE SCHEMA_NAME NOT IN "
-        f"('mysql','information_schema','performance_schema','sys');\"",
-        timeout=15)
-    if r.returncode != 0:
-        err = (r.stderr or "").strip().splitlines()
-        ui.warn(f"DB list failed: {err[0][:200] if err else 'unknown error'}")
-        return []
-
-    dbs = [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
-    if dbs:
-        ui.info(f"Found {len(dbs)} user database(s): {', '.join(dbs)}")
-    else:
-        ui.warn("No user databases found to back up.")
-    return dbs
+    return mariadb.list_user_databases(quiet=False)
 
 
 # ---------------------------------------------------------------------------
 def _ignore_for_backup(dirpath: str, names: list[str]) -> set[str]:
-    """Custom ignore filter for `shutil.copytree`.
-
-    Rules:
-      * Skip junk everywhere: .git, node_modules, caches, temp dirs, *.log.
-      * Inside htdocs/phpmyadmin/: keep only config.inc.php, skip everything
-        else (vendor/, libraries/, setup/, tmp/, ... — will be reinstalled).
-    """
+    """Custom ignore filter for `shutil.copytree`."""
     ignored: set[str] = set()
 
-    # --- junk across the tree ---
     for n in names:
         if n in (".git", "node_modules", "cache", ".cache",
                  ".myserver-cache", "tmp", "temp"):
@@ -107,13 +57,11 @@ def _ignore_for_backup(dirpath: str, names: list[str]) -> set[str]:
         elif n.endswith(".log"):
             ignored.add(n)
 
-    # --- special handling for htdocs/phpmyadmin/ ---
     try:
         rel = os.path.relpath(dirpath, paths.HTDOCS_DIR)
     except ValueError:
         rel = ""
 
-    # Normalize to forward slashes and strip leading './'
     rel = rel.replace(os.sep, "/").lstrip("./")
 
     if rel == PMA_DIRNAME:
@@ -126,6 +74,7 @@ def _ignore_for_backup(dirpath: str, names: list[str]) -> set[str]:
 
 # ---------------------------------------------------------------------------
 def create(name: str | None = None) -> Path | None:
+    paths.resolve_runtime_paths()
     paths.BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     ts = _timestamp()
     base = name.strip() if name else f"myserver-backup-{ts}"
@@ -206,13 +155,14 @@ def create(name: str | None = None) -> Path | None:
                 except Exception as e:
                     ui.warn(f"SSL copy failed ({p.name}): {e}")
 
-        # ---- configs ----
+        # ---- configs + virtual hosts ----
         cfg_dir = tmp / "config"
         cfg_dir.mkdir(exist_ok=True)
         for src, dst in (
             (paths.NGINX_CONF,           "nginx.conf"),
             (paths.PHP_FPM_CONF,         "www.conf"),
             (helpers.get_php_ini_path(), "php.ini"),
+            (paths.PHP_MYSERVER_INI,     "99-myserver.ini"),
             (paths.MY_CNF_FILE,          "my.cnf"),
         ):
             try:
@@ -220,6 +170,12 @@ def create(name: str | None = None) -> Path | None:
                     shutil.copy2(src, cfg_dir / dst)
             except Exception as e:
                 ui.warn(f"Config copy failed ({dst}): {e}")
+
+        if paths.NGINX_CONFD_DIR.exists() and any(paths.NGINX_CONFD_DIR.glob("*.conf")):
+            try:
+                shutil.copytree(paths.NGINX_CONFD_DIR, cfg_dir / "conf.d")
+            except Exception as e:
+                ui.warn(f"VHost conf.d copy failed: {e}")
 
         # ---- manifest ----
         dump_size = dump_file.stat().st_size if dump_file.exists() else 0
@@ -234,6 +190,7 @@ def create(name: str | None = None) -> Path | None:
                 "mysql":           dump_size >= MIN_SQL_DUMP_SIZE,
                 "ssl":             any(ssl_dir.iterdir()),
                 "config":          True,
+                "vhosts":          (cfg_dir / "conf.d").exists(),
             },
             "database_ok": db_ok,
             "sql_dump_bytes": dump_size,
@@ -265,10 +222,16 @@ def create(name: str | None = None) -> Path | None:
 
 # ---------------------------------------------------------------------------
 def list_backups() -> list[Path]:
-    if not paths.BACKUP_DIR.exists():
-        return []
-    return sorted(paths.BACKUP_DIR.glob("*.tar.gz"),
-                  key=lambda p: p.stat().st_mtime, reverse=True)
+    paths.resolve_runtime_paths()
+    found: list[Path] = []
+    for d in {paths.BACKUP_DIR, paths.HOME_BACKUP_DIR, paths.STORAGE_BACKUP_DIR}:
+        try:
+            if d.exists():
+                found.extend(d.glob("*.tar.gz"))
+        except Exception:
+            pass
+    unique = {p.resolve(): p for p in found}
+    return sorted(unique.values(), key=lambda p: p.stat().st_mtime, reverse=True)
 
 
 def list_cmd():
@@ -276,12 +239,12 @@ def list_cmd():
     if not backups:
         ui.info(f"No backups found in {paths.BACKUP_DIR}")
         return
-    ui.info(f"Backups in {paths.BACKUP_DIR}:")
+    ui.info(f"Backups ({len(backups)}):")
     for b in backups:
         st = b.stat()
         dt = datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M")
         size = st.st_size / (1024 * 1024)
-        print(f"  {dt}  {size:>8.2f} MB  {b.name}")
+        print(f"  {dt}  {size:>8.2f} MB  {b}")
 
 
 # ---------------------------------------------------------------------------
@@ -294,7 +257,6 @@ def restore(archive_path: str, force: bool = False) -> bool:
     ui.step(f"Verifying archive: {src.name}")
     tmp = Path(tempfile.mkdtemp(prefix="myserver-restore-"))
 
-    # import once at the top of restore so we can use it in except/finally
     from ..cli import services_ctl
 
     try:
@@ -375,10 +337,11 @@ def restore(archive_path: str, force: bool = False) -> bool:
         if cfg.exists():
             ui.info("Restoring configs...")
             for name, dest in (
-                ("nginx.conf", paths.NGINX_CONF),
-                ("www.conf",   paths.PHP_FPM_CONF),
-                ("php.ini",    helpers.get_php_ini_path()),
-                ("my.cnf",     paths.MY_CNF_FILE),
+                ("nginx.conf",      paths.NGINX_CONF),
+                ("www.conf",        paths.PHP_FPM_CONF),
+                ("php.ini",         helpers.get_php_ini_path()),
+                ("99-myserver.ini", paths.PHP_MYSERVER_INI),
+                ("my.cnf",          paths.MY_CNF_FILE),
             ):
                 s = cfg / name
                 if s.exists():
@@ -387,6 +350,13 @@ def restore(archive_path: str, force: bool = False) -> bool:
                         shutil.copy2(s, dest)
                     except Exception as e:
                         ui.warn(f"Config restore failed ({name}): {e}")
+            if (cfg / "conf.d").exists():
+                paths.NGINX_CONFD_DIR.mkdir(parents=True, exist_ok=True)
+                for vconf in (cfg / "conf.d").glob("*.conf"):
+                    try:
+                        shutil.copy2(vconf, paths.NGINX_CONFD_DIR / vconf.name)
+                    except Exception:
+                        pass
 
         # ---- mysql ----
         dump = tmp / "mysql" / "all-databases.sql"
@@ -395,9 +365,6 @@ def restore(archive_path: str, force: bool = False) -> bool:
         elif dump.stat().st_size < MIN_SQL_DUMP_SIZE:
             ui.warn(f"SQL dump too small ({dump.stat().st_size} bytes) — "
                     f"likely empty; DB restore skipped.")
-            ui.info("Tip: this archive was created by an older version of "
-                    "myserver. Databases were not captured. Create a fresh "
-                    "backup with the current version.")
         elif not mariadb.start_mariadb_background():
             ui.warn("MariaDB did not start — DB restore skipped.")
         else:
@@ -407,7 +374,9 @@ def restore(archive_path: str, force: bool = False) -> bool:
             with open(dump, "rb") as f:
                 r = subprocess.run(
                     [cli, "-u", "root", f"--socket={paths.MARIADB_SOCKET}"],
-                    stdin=f, stderr=subprocess.PIPE)
+                    stdin=f,
+                    stderr=subprocess.PIPE,
+                )
             if r.returncode != 0:
                 err = (r.stderr or b"").decode(errors="ignore").strip()
                 ui.err(f"DB restore FAILED (rc={r.returncode}):")
@@ -424,9 +393,9 @@ def restore(archive_path: str, force: bool = False) -> bool:
 
         # ---- fix permissions ----
         from ..services import nginx
-        nginx.enforce_htdocs_permissions(paths.HTDOCS_DIR)
+        nginx.enforce_htdocs_permissions(paths.HTDOCS_DIR, deep=True)
 
-        # ---- phpMyAdmin reinstall (not stored in backup) ----
+        # ---- phpMyAdmin reinstall ----
         if saved_pma_cfg_text:
             ui.step("Reinstalling phpMyAdmin fresh (tool, not user data)...")
             try:
@@ -441,16 +410,10 @@ def restore(archive_path: str, force: bool = False) -> bool:
                     except Exception as e:
                         ui.warn(f"Could not restore saved phpMyAdmin config: {e}")
                 else:
-                    ui.warn("phpMyAdmin reinstall failed — reinstall later:")
-                    ui.info("  myserver → 5 → 4   (or 'myserver quickstart')")
+                    ui.warn("phpMyAdmin reinstall failed — reinstall later via 'myserver quickstart'.")
             except Exception as e:
                 ui.warn(f"phpMyAdmin reinstall error: {e}")
 
-        # ---- stop services (return to clean idle state) ----
-        # MariaDB was started above for the SQL import; php-fpm/nginx may
-        # have been auto-started by reinstall_phpmyadmin's PHP calls.
-        # We deliberately return the system to "stopped" so the user
-        # starts services explicitly with `myserver start`.
         ui.step("Stopping services (idle state after restore)...")
         try:
             services_ctl.stop_all(quiet=True)
@@ -463,7 +426,6 @@ def restore(archive_path: str, force: bool = False) -> bool:
 
     except Exception as e:
         ui.err(f"Restore failed: {e}")
-        # Try to leave services stopped even on failure
         try:
             services_ctl.stop_all(quiet=True)
         except Exception:
@@ -492,7 +454,7 @@ def delete(archive_path: str) -> bool:
 
 # ---------------------------------------------------------------------------
 def choose_and_restore() -> bool:
-    """Interactive restore: show backups via fzf (arrow keys), then restore."""
+    """Interactive restore: show backups via fzf, then restore."""
     backups = list_backups()
     if not backups:
         ui.warn(f"No backups found in {paths.BACKUP_DIR}")
@@ -515,14 +477,13 @@ def choose_and_restore() -> bool:
     idx = ui.choose_option(
         "Select a backup to restore",
         options,
-        default=0)
+        default=0,
+    )
 
-    # --- Cancel ---
     if idx == len(options) - 1:
         ui.info("Cancelled.")
         return False
 
-    # --- Manual path ---
     if idx == len(options) - 2:
         try:
             path = input(f"{ui.C_YELLOW}Archive path: {ui.C_RESET}").strip()
@@ -533,7 +494,6 @@ def choose_and_restore() -> bool:
             return False
         return restore(path)
 
-    # --- Chosen backup ---
     selected = backups[idx]
     print()
     ui.info(f"Selected: {selected.name}")

@@ -1,380 +1,396 @@
-# MyServer --- Termux Web Server
+# MyServer — Termux Web Server (v2.22.0)
 
-**A local web development stack for Android powered by Termux.**
-<br/><br/><br/>
+**A complete, Android-optimized local web development stack (LEMP + Redis + Tools) powered by Termux.**
 
-<p align="center">
-<img src="https://github.com/elias0esmail/termux-web-server/blob/main/Screenshot.jpg"/>
-</p>
-<p align="center">
-<img src="https://github.com/elias0esmail/termux-web-server/blob/main/Screenshot1.jpg"/>
-</p>
-<br/><br/><br/>
+> 🌐 **Language / اللغة:** [🇸🇦 للغة العربية اضغط هنا (ARREADME.md)](https://www.google.com/search?q=./ARREADME.md) | 📄 **Release Notes:** [View Changelog (CHANGELOG.md)](https://www.google.com/search?q=./CHANGELOG.md)
 
-MyServer helps you install and manage a practical PHP web-server
-environment on Android. It brings together Nginx, PHP-FPM, MariaDB,
-Redis, HTTPS support, phpMyAdmin, backups, diagnostics, and an optional
-Cloudflare Tunnel in one command-line manager.
+<br/>
 
-> **Intended use:** local development, testing, and personal projects.
-> Review the security notes before exposing a server to a network or
-> using it with sensitive or production data.
+&lt;p align=&quot;center&quot;&gt;
+  &lt;img src=&quot;https://github.com/elias0esmail/termux-web-server/blob/main/Screenshot.jpg&quot; alt=&quot;MyServer Banner and Status&quot;/&gt;
+&lt;/p&gt;
+&lt;p align=&quot;center&quot;&gt;
+  &lt;img src=&quot;https://github.com/elias0esmail/termux-web-server/blob/main/Screenshot1.jpg&quot; alt=&quot;MyServer Interactive Menu&quot;/&gt;
+&lt;/p&gt;
 
-## Features
+<br/>
 
--   **Nginx** for serving websites and proxying PHP requests.
--   **PHP + PHP-FPM** for PHP applications.
--   **MariaDB** for relational databases.
--   **Redis** for cache and other application workloads.
--   **HTTPS/SSL** with a default self-signed certificate and support for
-    importing a custom certificate and key.
--   **phpMyAdmin** for browser-based database administration.
--   **Cloudflare Tunnel** to make a local HTTP service reachable through
-    a public URL when explicitly enabled.
--   **Live Reload** to refresh browser pages during development when
-    watched files change.
--   **Backup and restore** for website files, databases, configuration,
-    and SSL material.
--   **Diagnostics and logs** to help troubleshoot the environment.
--   **Service controls** for starting, stopping, restarting, and
-    checking the stack.
--   **Quickstart** helper for setting up supported application
-    frameworks.
--   **Optional boot integration** using Termux:Boot when available.
+**MyServer** installs, configures, and manages a full-featured PHP web-server environment on Android devices using **Termux**. It integrates **Nginx**, **PHP-FPM**, **MariaDB**, **Redis**, **HTTPS/SSL**, **phpMyAdmin**, **Virtual Hosts (Multi-Site)**, a **Database CLI**, **Live Reload**, **Full-Stack Backups**, **System Diagnostics (`doctor`)**, and an optional **Cloudflare Tunnel** inside a single zero-dependency Python manager engineered around Android's strict background process limits.
 
-## Requirements
+> **Release History & Recent Updates:** Click here to open [CHANGELOG.md](https://www.google.com/search?q=./CHANGELOG.md) and review all security fixes, new features, and Android process optimizations introduced in **v2.22.0**.
 
--   Android with [Termux](https://github.com/termux/termux-app)
-    installed from a supported source.
--   A working Termux package repository and internet access for
-    installation and updates.
--   Sufficient free storage for packages, website files, databases,
-    logs, and backups.
--   Optional: Termux:Boot for starting services after device boot.
--   Optional: Cloudflare Tunnel (`cloudflared`) for public access; the
-    installer attempts to install the required package.
+## Key Features
 
-MyServer targets Termux and Termux-like environments. Behavior can vary
-with Android restrictions, Termux package versions, and device
-power-management settings.
+- **Nginx Web Server:** Pre-configured for HTTP (`8080`) and HTTPS (`8443`) with Gzip compression, security headers, framework path protection, and Virtual Host (`conf.d/*.conf`) support.
+- **PHP + PHP-FPM (`ondemand`):** Pre-configured with essential extensions (`mysqli`, `pdo_mysql`, `gd`, `sodium`, `redis`, `apcu`, `imagick`, `mbstring`, `curl`, `zip`, `intl`, `bcmath`) and tuned with `pm = ondemand` so 0 idle worker processes run when inactive.
+- **MariaDB Database Server:** Initialized with normal root authentication, socket-based local security, automatic `unix_socket` repair, and low-memory mobile tuning.
+- **Redis Server:** In-memory cache and session store configured with `ARM64-COW-BUG` warning suppression and a 64 MB LRU cap (can be toggled on/off to save processes).
+- **Virtual Host Manager (`myserver site`):** Host multiple isolated projects (Laravel, WordPress, Nextcloud, or custom PHP) on dedicated ports (`8081`, `8082`, etc.) with automatic document-root and rewrite configuration.
+- **Database CLI (`myserver db`):** Create, drop, import (`.sql`), and export MariaDB databases directly from the command line without opening a browser.
+- **phpMyAdmin (Local-Only Protected):** Browser-based database management at `http://localhost:8080/phpmyadmin` with full configuration storage (`pmadb`) and automatic `HTTP 403` blocking on public Cloudflare Tunnels.
+- **Live Reload Server:** Event-driven browser auto-refresh powered by `inotifywait` (write-only event filtering, 500ms debounce, `.myserver-ignore` support, and `.livereload` marker injection).
+- **Cloudflare Tunnel (`internet-enable`):** Share your local website over a public `https://*.trycloudflare.com` URL with one command while keeping `/phpmyadmin` and `/phpinfo` strictly blocked from external visitors.
+- **Full-Stack Backup & Restore:** Snapshot `htdocs`, user databases, SSL certificates, Virtual Hosts, and server configurations into a single `.tar.gz` archive with pre-restore safety snapshots.
+- **Self-Diagnostics (`myserver doctor`):** Inspects installed packages, PHP extensions, config files, permissions, ports, MariaDB socket login, SSL validity, internet connectivity, and your live **Android 12+ Phantom Process budget (`X/32`)** with `--fix` auto-repair.
+- **Quickstart Framework Installer:** One-step setup for **WordPress**, **Laravel**, **Nextcloud**, and **phpMyAdmin**.
 
-## Installation
+## 1. Step 1: Download and Install Termux
 
-### 1. Update Termux packages
+Before installing MyServer, you must install **Termux** from an official, up-to-date source.
 
-``` bash
-pkg update -y && pkg upgrade -y
-```
+> **Important Warning:** Do **NOT** install Termux from the Google Play Store. The Play Store build is deprecated and its package repositories no longer work. Always install Termux from **GitHub Releases** or **F-Droid**.
 
-### 2. Install prerequisites
+### Official Termux Download Links
 
-``` bash
-pkg install -y python git curl
-```
+| Application | Purpose | Official Download Links |
+| :--- | :--- | :--- |
+| **Termux** *(Required)* | Core Android terminal and Linux environment | • [Download APK from GitHub Releases](https://www.google.com/search?q=https://github.com/termux/termux-app/releases)<br>• [Download from F-Droid](https://www.google.com/search?q=https://f-droid.org/en/packages/com.termux/) |
+| **Termux:API** *(Recommended)* | Enables `termux-wake-lock` to prevent Android from sleeping while the server runs | • [Download from GitHub Releases](https://www.google.com/search?q=https://github.com/termux/termux-api/releases)<br>• [Download from F-Droid](https://www.google.com/search?q=https://f-droid.org/en/packages/com.termux.api/) |
+| **Termux:Boot** *(Optional)* | Automatically starts MyServer when your Android phone boots up | • [Download from GitHub Releases](https://www.google.com/search?q=https://github.com/termux/termux-boot/releases)<br>• [Download from F-Droid](https://www.google.com/search?q=https://f-droid.org/en/packages/com.termux.boot/) |
 
-### 3. Download the repository
+*Tip: Which APK should I download from GitHub Releases?*
+- Most modern phones (2018+) use **`termux-app_vX.XX.X+..._arm64-v8a.apk`**.
+- If you are unsure of your device architecture, download the **`universal.apk`** variant.
+- Note: Do not mix signing keys—install Termux, Termux:API, and Termux:Boot all from **GitHub** OR all from **F-Droid**.
 
-``` bash
-git clone https://github.com/elias0esmail/termux-web-server.git
-cd termux-web-server
-```
+### Initial Termux Preparation
 
-### 4. Run the installer
+After installing and opening the **Termux** app on your phone:
 
-``` bash
-python install.py
-```
+1. **Grant Shared Storage Permission** *(needed if you want to store websites or backups in your phone's shared storage)*:
+   ```bash
+   termux-setup-storage
+   ```
+   Tap **Allow** on the Android permission prompt.
 
-The installer installs the required packages and configures the stack.
-During a fresh installation, it asks where to create the web root and
-whether to set a MariaDB root password.
+2. **Update Termux Base Packages:**
+   ```bash
+   pkg update -y && pkg upgrade -y
+   ```
+   *(If prompted about configuration files during upgrade, press `Enter` to keep the default).*
 
-Choose a strong database password. Avoid leaving the database
-administrator account without a password, especially if the device may
-be reachable from other devices.
+3. **Disable Battery Optimization for Termux:**
+   Open Android **Settings → Apps → Termux → Battery** and select **Unrestricted** (or *Don't optimize*) so Android does not suspend your server in the background.
 
-After installation, launch the manager:
+## 2. Step 2: Install MyServer from the Server
 
-``` bash
-myserver
-```
+You can install MyServer either with a **single command directly from the server** (recommended) or by **cloning the repository manually**.
 
-### One-command installation
+### Method A: One-Command Direct Server Installation (Recommended)
 
-The repository also documents this convenience command:
+Paste and run this single command inside Termux:
 
-``` bash
+```bash
 curl -fsSL https://raw.githubusercontent.com/elias0esmail/termux-web-server/main/install.sh | bash
 ```
 
-**Security note:** piping a remote script directly to a shell runs code
-from the network immediately. For greater control, download and inspect
-the script before executing it.
+**What this command does automatically:**
+1. Ensures minimal prerequisites (`curl`, `tar`, `python`) are installed.
+2. Downloads the latest release tarball from the official GitHub repository into a temporary folder.
+3. Extracts the package and launches `python install.py`.
+4. Cleans up temporary installation files once finished.
 
-## Default local URLs
+### Method B: Manual Git Clone Installation
 
-The installer reports the URLs after a successful setup. The current
-configuration uses these default ports:
+If you prefer to inspect the code or keep a local Git clone before installing:
 
-  ------------------------------------------------------------------------------------
-  Service                 Default URL / port                   Notes
-  ----------------------- ------------------------------------ -----------------------
-  Website over HTTP       `http://localhost:8080`              Local web server
+```bash
+# 1. Update packages and install prerequisites
+pkg update -y && pkg upgrade -y
+pkg install -y python git curl
 
-  Website over HTTPS      `https://localhost:8443`             Uses a self-signed
-                                                               certificate by default
+# 2. Clone the repository
+git clone https://github.com/elias0esmail/termux-web-server.git
+cd termux-web-server
 
-  phpMyAdmin              `http://localhost:8080/phpmyadmin`   Database administration
-                                                               interface
+# 3. Run the Python installer
+python install.py
+```
 
-  PHP-FPM                 `127.0.0.1:9000`                     Internal FastCGI
-                                                               endpoint; do not expose
-                                                               publicly
+### Interactive Setup Prompts During Installation
 
-  Live Reload             `127.0.0.1:35730`                    Local development
-                                                               helper
-  ------------------------------------------------------------------------------------
+During a fresh installation, `install.py` will ask you two questions:
+1. **Web Root Location (`htdocs`):**
+   - **Option 1 — `Termux home` (`~/htdocs`):** Best performance and full Linux `chmod` permission support (recommended for Laravel and Composer projects).
+   - **Option 2 — `Phone storage` (`~/storage/shared/htdocs`):** Makes your website files directly visible in Android file managers and code editors.
+2. **MariaDB `root` Password:**
+   - Enter a custom password (saved securely to `~/.my.cnf` with `chmod 600` so CLI tools still work seamlessly), or press `Enter` to leave it blank for local-only development.
 
-The default web root is `~/htdocs`. The installer can instead use shared
-phone storage, typically `~/storage/shared/htdocs`, after Termux storage
-access is configured.
+## 3. Step 3: Launch and Use MyServer
 
-A self-signed certificate may trigger a browser warning. That is
-expected unless the certificate is explicitly trusted by the client.
+Once installation finishes, run `myserver` from anywhere in Termux to open the interactive control panel:
 
-## Command reference
+```bash
+myserver
+```
 
-Run `myserver help` to display the command list supported by the
-installed version.
+Or start all services directly from the command line:
 
-### Service management
-
-``` bash
+```bash
 myserver start
-myserver stop
-myserver restart
-myserver status
 ```
 
-### Live Reload
+### Default URLs and Ports
 
-``` bash
-myserver live-start
-myserver live-status
-myserver live-restart
-myserver live-stop
+| Service | Default URL / Endpoint | Access Scope & Notes |
+| :--- | :--- | :--- |
+| **HTTP Website** | `http://localhost:8080` | Primary local web server |
+| **LAN Wi-Fi Website** | `http://<PHONE-LAN-IP>:8080` | Reachable from other devices on the same Wi-Fi network (shown in `myserver status`) |
+| **HTTPS Website** | `https://localhost:8443` | TLSv1.2/1.3 (uses self-signed cert by default, or custom cert via `ssl-import`) |
+| **phpMyAdmin** | `http://localhost:8080/phpmyadmin` | **Local Only** — automatically returns `403 Forbidden` on public Cloudflare Tunnel URLs |
+| **Virtual Hosts** | `http://localhost:8081+` | Dedicated ports for multi-site projects added via `myserver site add` |
+| **PHP-FPM** | `127.0.0.1:9000` | Internal FastCGI socket (`ondemand`, max 4 workers) |
+| **MariaDB** | `$PREFIX/var/run/mysqld/mysqld.sock` | Local Unix socket + `127.0.0.1:3306` |
+| **Redis** | `127.0.0.1:6379` | Local cache server (64 MB maxmemory LRU) |
+| **Live Reload** | `127.0.0.1:35730` | Local SSE auto-refresh server (`/__live/sse`) |
+
+## 4. Interactive Menu Overview
+
+Running `myserver` without arguments launches the interactive TUI menu.
+
+**When the server is stopped:**
+- `1) start` — Start MariaDB, Redis, PHP-FPM, and Nginx, and display URLs + Android process count.
+- `2) refresh status` — Re-check service states and memory usage.
+- `3) backup-list` — List all `.tar.gz` backups.
+- `4) restore` — Interactive `fzf` selector to restore a backup archive.
+- `5) doctor` — Run the 38-point diagnostic check.
+- `6) ssl-info` — Inspect SSL certificate validity and SHA-256 fingerprint.
+- `7) update` — Check GitHub for newer SemVer releases and view [CHANGELOG.md](https://www.google.com/search?q=./CHANGELOG.md).
+- `8) reinstall` — Refresh configurations and phpMyAdmin while preserving all databases and `htdocs`.
+- `9) uninstall` — Permanently remove the server stack (requires typing `yes`).
+
+**When the server is running:**
+- Includes one-key controls to **Stop**, **Toggle Live Reload**, **Toggle Public Cloudflare Tunnel**, **Restart**, launch **Quickstart**, manage **Virtual Hosts (`sites`)**, manage **Databases (`db`)**, create a **Backup**, run **Doctor**, view **Logs**, or **Exit**.
+
+## 5. Command Reference
+
+Run `myserver help` at any time to view all supported CLI commands.
+
+### Service Lifecycle & Process Saving
+
+```bash
+myserver start           # Start all enabled services
+myserver stop            # Gracefully stop all services and release wake-lock
+myserver restart         # Restart all services
+myserver status          # Show service status, RAM usage, LAN IP, and Android process count
+myserver redis-disable   # Disable Redis to save 1 background process slot on Android
+myserver redis-enable    # Re-enable and start Redis
 ```
 
-The manager also supports `live-enable`, `live-disable`, and
-`live-toggle`.
+### Virtual Hosts (Multi-Site Manager)
 
-### Public access with Cloudflare Tunnel
+Host multiple projects on dedicated local ports without editing Nginx config files manually:
 
-``` bash
+```bash
+# List all configured virtual hosts
+myserver site list
+
+# Add a Laravel project on port 8081 (automatically sets root to .../myapp/public)
+myserver site add myapp ~/htdocs/myapp --port 8081 --type laravel
+
+# Add a standard PHP or WordPress site (auto-assigns next free port 8081+)
+myserver site add blog ~/htdocs/blog --type wordpress
+
+# Remove a virtual host (keeps project files intact)
+myserver site remove myapp
+```
+
+### Database CLI (`myserver db`)
+
+Manage MariaDB databases directly from the terminal without opening phpMyAdmin:
+
+```bash
+myserver db list                        # List all user databases
+myserver db create shop_db              # Create a new utf8mb4 database
+myserver db import shop_db schema.sql   # Import a .sql dump into shop_db
+myserver db export shop_db backup.sql   # Export shop_db to a .sql file
+myserver db drop shop_db                # Drop a user database (with confirmation)
+```
+
+### Quickstart Framework Installer
+
+```bash
+myserver quickstart
+```
+
+Provides an interactive menu to download, configure, and create databases/virtual hosts for:
+1. **WordPress** (`http://localhost:8080/wordpress`)
+2. **Laravel** (`http://localhost:8080/<name>/public` + dedicated Virtual Host port)
+3. **Nextcloud** (creates database + dedicated user + Virtual Host with CalDAV/CardDAV rules)
+4. **phpMyAdmin** (fresh installation or update while preserving `config.inc.php`)
+
+### Live Reload (Auto-Refresh Browser on Save)
+
+```bash
+myserver live-start      # Start Live Reload watcher and enable HTML injection
+myserver live-stop       # Stop Live Reload and remove HTML injection
+myserver live-restart    # Restart Live Reload
+myserver live-status     # Show watcher status, client cap, and marker state
+myserver live-toggle     # Toggle Live Reload on/off
+```
+
+- Uses `inotifywait` to watch write events (`MODIFY`, `CLOSE_WRITE`, `CREATE`, `DELETE`, `MOVE`) with a 500ms debounce.
+- Only injects `<script src="/__live.js"></script>` when the `.livereload` marker file exists in your web root.
+- Create a `.myserver-ignore` file in your web root (glob patterns, one per line) to ignore custom build/cache paths.
+
+### Public Internet Access (Cloudflare Tunnel)
+
+```bash
 myserver internet-enable
 myserver internet-disable
 ```
 
-Enabling a tunnel can expose the local website to the public internet.
-Before enabling it, check application authentication, debug settings,
-uploaded files, secrets, database administration endpoints, and any
-development-only routes. Do not assume a local-only application is safe
-to publish.
+- Starts `cloudflared tunnel --url http://localhost:8080` and prints your public `https://*.trycloudflare.com` URL.
+- **Built-in Admin Protection:** Requests arriving through Cloudflare carry the `CF-Connecting-IP` header. MyServer's Nginx configuration automatically blocks any request with this header from accessing `/phpmyadmin` or `/phpinfo` (`403 Forbidden`), ensuring your database admin panel stays strictly local.
 
-### Backups and restore
+### Full-Stack Backups & Restore
 
-``` bash
-myserver backup
-myserver backup-list
-myserver restore /path/to/backup.tar.gz
+```bash
+myserver backup                # Create timestamped archive (myserver-backup-YYYYMMDD-HHMMSS.tar.gz)
+myserver backup pre-upgrade    # Create named archive (pre-upgrade.tar.gz)
+myserver backup-list           # List available backup archives with size and date
+myserver restore               # Open interactive fzf selector to choose and restore a backup
+myserver restore /path/to/file.tar.gz
 ```
 
-Restore can overwrite the current web root, databases, SSL files, and
-configuration. Read the prompts carefully and keep an independent copy
-of important data before restoring.
+- Backups include `htdocs`, all user MariaDB databases (`all-databases.sql`), SSL certificates, Virtual Hosts (`conf.d/`), and server config files (`nginx.conf`, `www.conf`, `99-myserver.ini`, `.my.cnf`).
+- Stored in `~/storage/shared/myserver-backups` if Termux shared storage is enabled, or `~/myserver-backups` otherwise.
+- Restoring automatically creates a `pre-restore-*` safety snapshot first.
 
-### Diagnostics and logs
+### SSL Certificate Management
 
-``` bash
-myserver doctor
-myserver logs nginx
-myserver logs php
-myserver logs redis
-myserver logs live
-myserver logs tunnel
+```bash
+myserver ssl-info                            # Display cert subject, expiry, days left, and SHA-256
+myserver ssl-import /path/cert.pem /path/key.pem   # Import a custom certificate & private key
+myserver ssl-remove                          # Revert to the default self-signed certificate
 ```
 
-### SSL certificate management
+### Diagnostics, Logs, and Maintenance
 
-``` bash
-myserver ssl-info
-myserver ssl-import /path/to/certificate.pem /path/to/private-key.pem
-myserver ssl-remove
+```bash
+myserver doctor          # Run full 38-point diagnostic check
+myserver doctor --fix    # Auto-install missing PHP extensions, fix permissions, and start services
+myserver logs nginx      # Tail Nginx access and error logs
+myserver logs php        # Tail PHP-FPM error log
+myserver logs redis      # Tail Redis log
+myserver logs live       # Tail Live Reload watcher log
+myserver logs tunnel     # Tail Cloudflare Tunnel log
+myserver wake-lock       # Acquire Termux wake-lock
+myserver wake-unlock     # Release Termux wake-lock
+myserver wake-status     # Show wake-lock and Termux:Boot status
+myserver version         # Print current installed version
+myserver update          # Check GitHub for newer SemVer releases and install
+myserver reinstall       # Re-run installer while keeping databases and htdocs
+myserver uninstall       # Completely remove MyServer, databases, and htdocs
 ```
 
-Use a certificate and private key that belong together. Keep private
-keys confidential and protect their filesystem permissions.
+## 6. PHP Configuration & Custom Extensions
 
-### Other maintenance commands
+MyServer v2.22.0 does **not** overwrite your main `$PREFIX/etc/php/php.ini` file. Instead, it writes its defaults to a drop-in configuration file:
 
-``` bash
-myserver version
-myserver update
-myserver reinstall
-myserver quickstart
-myserver wake-lock
-myserver wake-status
-myserver wake-unlock
-myserver uninstall
+```text
+$PREFIX/etc/php/conf.d/99-myserver.ini
 ```
 
-**Warning:** `myserver uninstall` is destructive. It can remove the web
-root, databases, server configuration, and related files. Create and
-verify backups before using it.
+Default settings in `99-myserver.ini`:
+- `upload_max_filesize = 512M`
+- `post_max_size = 512M`
+- `memory_limit = 256M`
+- `max_execution_time = 300`
+- `mysqli.default_socket` & `pdo_mysql.default_socket` pointed to `$PREFIX/var/run/mysqld/mysqld.sock`
 
-## Application setup
+You can freely edit `$PREFIX/etc/php/php.ini` for your own custom directives without losing them during `myserver update` or `myserver reinstall`.
 
-Place a PHP project inside the configured web root. For frameworks such
-as Laravel, configure the web server's document root to the framework's
-public directory and follow the framework's production deployment
-guidance before exposing the application publicly.
+## 7. Android 12+ Phantom Process Optimization
 
-Do not place `.env` files, private keys, database dumps, source-control
-metadata, or other secrets in a publicly served directory. Confirm that
-hidden files and sensitive paths are blocked as expected, and test the
-final configuration.
+Android 12, 13, 14, and newer enforce an OS-level limit of **32 phantom child processes** across background apps (`max_phantom_processes`). If a terminal app spawns too many worker processes or shell sub-processes, Android kills the entire process tree with `[Process completed (signal 9)]`.
 
-The `myserver quickstart` command provides a framework setup helper.
-Available options may vary by installed version.
+### How MyServer v2.22.0 Conserves Process Slots
 
-## Backup recommendations
+1. **PHP-FPM `ondemand` Mode:** Instead of pre-forking 3 to 10 persistent PHP worker processes, PHP-FPM runs **only 1 master process** when idle and spawns up to 4 workers on demand (`10s` idle timeout).
+2. **Single-Worker Nginx:** Runs `worker_processes 1;` (1 master + 1 worker) with `worker_connections 512;`.
+3. **Direct `mariadbd` Execution:** Starts `mariadbd` directly (`--performance-schema=OFF --max-connections=25`) without the `mariadbd-safe` shell wrapper process.
+4. **Pure-Python `/proc` & Network Inspection:** Checks service PIDs, memory usage (`VmRSS`), LAN IP, and internet reachability directly in Python without spawning `/bin/sh`, `pgrep`, `pkill`, or `curl` subprocesses.
+5. **Optional Redis Toggle:** Run `myserver redis-disable` if your project does not use Redis to free an additional background process.
 
--   Create backups before upgrades, reinstallations, configuration
-    changes, or restores.
--   Store at least one copy outside the phone, such as on a trusted
-    computer or encrypted external storage.
--   Periodically test restoration on a separate test location or device.
--   Treat backup archives as sensitive: they may contain database
-    contents, application secrets, configuration, and private SSL keys.
--   Do not assume that a backup is valid merely because the archive file
-    exists.
+### Optional: Disabling Android's 32-Process Limit via ADB
 
-## Security considerations
+If you run heavy workloads alongside MyServer (such as Composer, Node.js, or SSH sessions) on Android 12+, you can disable Android's phantom process killer using **ADB** or **LADB / Shizuku**:
 
-MyServer is a convenience manager for a mobile development environment,
-not a substitute for a production server security review.
-
--   **Network exposure:** verify which interfaces each service listens
-    on. Do not expose MariaDB, Redis, PHP-FPM, or Live Reload to
-    untrusted networks.
--   **Database credentials:** set a strong password and use separate,
-    least-privilege database accounts for applications.
--   **Public tunnels:** a Cloudflare Tunnel URL can make a local
-    application publicly reachable. Disable debug mode and protect
-    administrative routes before enabling it.
--   **HTTPS:** the default self-signed certificate is for local use and
-    is not automatically trusted by browsers.
--   **Updates:** review changes and keep a known-good backup before
-    updating. The updater downloads the repository's current main-branch
-    archive, so the installed code can change as the branch changes.
--   **Backups and restore:** only restore archives you trust. Verify
-    backups before relying on them for disaster recovery.
--   **Android background limits:** battery optimization and process
-    management can stop background services. Test the behavior on your
-    device and use Termux:Boot only if you understand its requirements.
-
-## Troubleshooting
-
-### The website does not open
-
-1.  Run `myserver status`.
-2.  Run `myserver doctor`.
-3.  Inspect the logs with `myserver logs nginx` and `myserver logs php`.
-4.  Confirm the service is listening on the expected port and that the
-    device has not restricted Termux in the background.
-
-### PHP pages fail
-
-1.  Check `myserver logs php`.
-2.  Confirm PHP-FPM is running.
-3.  Check that the required PHP extensions for your application are
-    installed and enabled.
-4.  Review file permissions and the application's own logs.
-
-### Database connection fails
-
-1.  Check `myserver status` and `myserver doctor`.
-2.  Confirm MariaDB is running.
-3.  Verify the database name, username, password, and socket/host used
-    by the application.
-4.  Avoid using the database root account from the application.
-
-### Phone storage is inaccessible
-
-Run Termux's storage setup when needed:
-
-``` bash
-termux-setup-storage
+```bash
+adb shell "/system/bin/device_config set_sync_disabled_for_tests persistent"
+adb shell "/system/bin/device_config put activity_manager max_phantom_processes 2147483647"
+adb shell settings put global settings_enable_monitor_phantom_procs false
 ```
 
-Grant the requested Android permission, then check that the configured
-web-root path exists.
+## 8. Project Architecture & Testing
 
-### Cloudflare Tunnel does not start
-
-1.  Confirm the local HTTP site works at `http://localhost:8080`.
-2.  Check connectivity and DNS.
-3.  Inspect `myserver logs tunnel`.
-4.  Remember that the tunnel requires internet access and is separate
-    from the local web server.
-
-## Project layout
-
-The main package is organized by responsibility:
-
-``` text
-myserver/
-├── core/       # Shared helpers, paths, and UI utilities
-├── services/   # Nginx, PHP, MariaDB, Redis, and SSL setup
-├── features/   # Backups, diagnostics, tunnel, and Live Reload
-├── cli/        # Command dispatch, menus, and service control
-└── i18n/       # Localization resources
+```text
+termux-web-server/
+├── install.py                  # Main stack installer & configurator
+├── install.sh                  # One-command curl|bash bootstrap script
+├── VERSION                     # Current Semantic Version (2.22.0)
+├── CHANGELOG.md                # Release history & changelog
+├── README.md                   # English documentation
+├── ARREADME.md                 # Arabic documentation (النسخة العربية)
+├── pyproject.toml              # Standard Python packaging & test config
+├── myserver/
+│   ├── __init__.py
+│   ├── core/
+│   │   ├── helpers.py          # /proc inspection, shell=False runner, SemVer, network checks
+│   │   ├── paths.py            # Filesystem paths & safe backup directory resolution
+│   │   └── ui.py               # ANSI colors & fzf interactive selector
+│   ├── services/
+│   │   ├── mariadb.py          # Direct mariadbd lifecycle, auth repair, safe SQL runner
+│   │   ├── nginx.py            # Nginx config generator, tunnel protection, fast perms
+│   │   ├── php.py              # PHP-FPM ondemand setup & conf.d/99-myserver.ini
+│   │   ├── redis.py            # Low-memory Redis config & enable/disable toggle
+│   │   └── ssl.py              # Self-signed & custom SSL certificate management
+│   ├── features/
+│   │   ├── backup.py           # Full-stack .tar.gz backup & safe restore
+│   │   ├── db_cli.py           # Terminal database manager (myserver db)
+│   │   ├── doctor.py           # 38-point environment & Android process diagnostics
+│   │   ├── live_reload.py      # Live Reload controller & .livereload marker manager
+│   │   ├── live_server.py      # Standalone inotifywait SSE server (myserver-live)
+│   │   ├── quickstart.py       # WordPress, Laravel, Nextcloud, & phpMyAdmin installers
+│   │   ├── tunnel.py           # Cloudflare Tunnel manager
+│   │   ├── vhost.py            # Virtual Host multi-site manager (myserver site)
+│   │   └── wake_lock.py        # Termux wake-lock & Termux:Boot script installer
+│   └── cli/
+│       ├── commands.py         # CLI argument dispatcher & SemVer updater
+│       ├── menu.py             # Interactive TUI dashboard
+│       └── services_ctl.py     # Ordered service start/stop/restart & log viewer
+└── tests/
+    └── test_myserver.py        # Automated unit & integration test suite
 ```
 
-Other important files include:
+To run the automated test suite locally:
 
--   `install.py` --- installs packages and configures the server stack.
--   `VERSION` --- current project version.
--   `CHANGELOG.md` --- release history.
--   `install.sh` --- convenience installer, if present in the selected
-    repository revision.
+```bash
+python3 -m unittest discover -s tests -v
+```
 
-The exact files and commands can change between revisions; use
-`myserver help` and the repository's current source as the authority for
-the installed version.
+## 9. Troubleshooting
 
-## Contributing
+- **Website does not open at `http://localhost:8080`:**
+  Run `myserver status` and `myserver doctor --fix`, then check `myserver logs nginx`.
+- **Database connection refused or `Access denied for user 'root'@'localhost'`:**
+  Ensure MariaDB is running (`myserver status`). If authentication was corrupted, run `myserver reinstall` (your databases and `htdocs` will be preserved while `mariadb.py` repairs `root@localhost` authentication).
+- **Permission denied (`403 Forbidden`) when Web Root is on Phone Storage:**
+  Run `termux-setup-storage` and grant storage permissions in Android Settings, then run `myserver restart`.
+- **`/phpmyadmin` returns `403 Forbidden` on my Cloudflare Tunnel link:**
+  This is an intentional security feature in v2.22.0 to prevent exposing your database administrator panel to the public internet. Access phpMyAdmin locally at `http://localhost:8080/phpmyadmin`.
 
-Issues and pull requests are welcome. When reporting a problem, include:
+## 10. Developer & Links
 
--   Android version and device architecture.
--   Termux source and version.
--   Python and PHP versions.
--   The command that failed and the complete relevant error output.
--   Relevant logs with passwords, tokens, private URLs, and other
-    sensitive values removed.
-
-For code changes, prefer focused commits and include reproducible tests
-or manual test steps, especially for installation, upgrades, service
-lifecycle, and backup/restore behavior.
+- **Developer:** Elias M. Esmail
+- **GitHub Profile:** [https://github.com/elias0esmail](https://www.google.com/search?q=https://github.com/elias0esmail)
+- **Repository:** [https://github.com/elias0esmail/termux-web-server](https://www.google.com/search?q=https://github.com/elias0esmail/termux-web-server)
+- **Arabic Guide:** [ARREADME.md (الدليل الشامل باللغة العربية)](https://www.google.com/search?q=./ARREADME.md)
+- **Changelog:** [CHANGELOG.md](https://www.google.com/search?q=./CHANGELOG.md)
+- **Issues & Bug Reports:** [https://github.com/elias0esmail/termux-web-server/issues](https://www.google.com/search?q=https://github.com/elias0esmail/termux-web-server/issues)
+- **WhatsApp:** `+967771902342`
 
 ## License
 
-The repository's license file is the authoritative source for licensing
-terms. Review it before redistributing or incorporating this project
-into another product.
-
-## Repository
-
--   GitHub: https://github.com/elias0esmail/termux-web-server
--   Issues: https://github.com/elias0esmail/termux-web-server/issues
+Released under the [MIT License](https://www.google.com/search?q=./LICENSE).

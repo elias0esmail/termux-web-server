@@ -1,7 +1,6 @@
 """Manage the Live Reload helper (install/start/stop/status)."""
 from __future__ import annotations
 
-import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -43,11 +42,7 @@ def install_binary() -> bool:
 
 # ---------------------------------------------------------------------------
 def is_running() -> bool:
-    if paths.PID_LIVE.exists():
-        pid = helpers.read_pid_file(paths.PID_LIVE)
-        if pid and helpers.pid_alive(pid):
-            return True
-    return helpers.is_process_running("myserver-live")
+    return helpers.is_process_running("myserver-live", pid_file=paths.PID_LIVE)
 
 
 # ---------------------------------------------------------------------------
@@ -64,8 +59,7 @@ def _marker_exists() -> bool:
 
 
 def _ensure_marker() -> bool:
-    """Live reload injection requires .livereload marker in web root.
-       Ask user whether to create it now."""
+    """Live reload injection requires .livereload marker in web root."""
     if _marker_exists():
         return True
     ui.warn(f"Marker file '{paths.LIVE_MARKER_FILE}' not found in web root.")
@@ -75,7 +69,8 @@ def _ensure_marker() -> bool:
         return False
     try:
         (paths.HTDOCS_DIR / paths.LIVE_MARKER_FILE).write_text(
-            "# Presence of this file enables Live Reload HTML injection.\n")
+            "# Presence of this file enables Live Reload HTML injection.\n"
+        )
         ui.ok(f"Marker created: {paths.HTDOCS_DIR / paths.LIVE_MARKER_FILE}")
         return True
     except Exception as e:
@@ -85,10 +80,8 @@ def _ensure_marker() -> bool:
 
 # ---------------------------------------------------------------------------
 def start() -> bool:
-    from ..services import nginx as ngx
-
-    if not (helpers.is_process_running("nginx")
-            or helpers.is_process_running("php-fpm")):
+    if not (helpers.is_process_running("nginx", pid_file=paths.PID_NGINX)
+            or helpers.is_process_running("php-fpm", pid_file=paths.PID_PHP)):
         ui.err("Server is not running — start it first.")
         return False
 
@@ -104,8 +97,7 @@ def start() -> bool:
         ui.err(f"Port {paths.LIVE_PORT} is already in use.")
         return False
 
-    # marker + conf
-    _ensure_marker()
+    marker_ok = _ensure_marker()
 
     ui.step(f"Starting Live Reload on port {paths.LIVE_PORT}...")
     for f in (paths.PID_LIVE, paths.LIVE_LOG_FILE):
@@ -122,13 +114,14 @@ def start() -> bool:
              str(paths.LIVE_PORT),
              str(paths.PID_LIVE),
              str(paths.LIVE_LOG_FILE)],
-            stdout=logf, stderr=logf,
+            stdout=logf,
+            stderr=logf,
             stdin=subprocess.DEVNULL,
             start_new_session=True,
         )
 
     for _ in range(5):
-        time.sleep(1)
+        time.sleep(0.6)
         if is_running():
             break
 
@@ -136,7 +129,10 @@ def start() -> bool:
         ui.err(f"Failed to start Live Reload. Check: {paths.LIVE_LOG_FILE}")
         return False
 
-    _write_conf_enabled()
+    if marker_ok:
+        _write_conf_enabled()
+    else:
+        _write_conf_disabled()
     nginx.reload()
     ui.ok("Live Reload enabled (auto-refresh on save).")
     ui.info(f"Watching: {paths.HTDOCS_DIR}")
@@ -166,7 +162,7 @@ def stop(quiet: bool = False) -> bool:
 
 def restart() -> bool:
     stop(quiet=True)
-    time.sleep(1)
+    time.sleep(0.8)
     return start()
 
 

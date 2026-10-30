@@ -1,5 +1,7 @@
+"""SSL certificate generation, inspection, and custom certificate import."""
 from __future__ import annotations
 
+import hashlib
 import os
 import subprocess
 from datetime import datetime, timezone
@@ -67,13 +69,15 @@ def setup() -> bool:
                 ui.ok("Using custom certificate.")
             return True
 
-        # generate self-signed
         cnf = paths.SSL_DIR / "openssl.cnf"
         cnf.write_text(OPENSSL_CNF)
-        helpers.run_cmd(
-            f"openssl req -x509 -nodes -days 365 -newkey rsa:2048 "
-            f"-keyout '{paths.DEFAULT_KEY}' -out '{paths.DEFAULT_CERT}' "
-            f"-config '{cnf}'")
+        helpers.run_cmd([
+            "openssl", "req", "-x509", "-nodes", "-days", "365",
+            "-newkey", "rsa:2048",
+            "-keyout", str(paths.DEFAULT_KEY),
+            "-out", str(paths.DEFAULT_CERT),
+            "-config", str(cnf),
+        ])
         try:
             os.chmod(paths.DEFAULT_KEY, 0o600)
             os.chmod(paths.SSL_DIR, 0o700)
@@ -91,7 +95,10 @@ def _openssl_text(cert: Path, field: str) -> str:
     try:
         r = subprocess.run(
             ["openssl", "x509", "-in", str(cert), "-noout", "-" + field],
-            capture_output=True, text=True, timeout=8)
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
         if r.returncode == 0:
             return r.stdout.strip()
     except Exception:
@@ -116,24 +123,21 @@ def cert_info() -> dict:
     }
     if not cert.exists():
         return info
-    info["subject"]  = _openssl_text(cert, "subject")
-    info["issuer"]   = _openssl_text(cert, "issuer")
-    info["not_after"] = _openssl_text(cert, "enddate").replace("notAfter=", "")
+    info["subject"]    = _openssl_text(cert, "subject")
+    info["issuer"]     = _openssl_text(cert, "issuer")
+    info["not_after"]  = _openssl_text(cert, "enddate").replace("notAfter=", "")
     info["not_before"] = _openssl_text(cert, "startdate").replace("notBefore=", "")
-    info["sha256"]   = _openssl_text(cert, "fingerprint").split("=", 1)[-1].strip()
-    try:
-        r = subprocess.run(
-            ["openssl", "x509", "-in", str(cert), "-noout", "-enddate"],
-            capture_output=True, text=True, timeout=5)
-        if r.returncode == 0 and "notAfter=" in r.stdout:
-            date_str = r.stdout.strip().split("=", 1)[1]
-            dt = datetime.strptime(date_str, "%b %d %H:%M:%S %Y %Z").replace(
-                tzinfo=timezone.utc)
+    info["sha256"]     = _openssl_text(cert, "fingerprint").split("=", 1)[-1].strip()
+    if info["not_after"]:
+        try:
+            dt = datetime.strptime(info["not_after"], "%b %d %H:%M:%S %Y %Z").replace(
+                tzinfo=timezone.utc
+            )
             delta = dt - datetime.now(timezone.utc)
             info["days_left"] = delta.days
             info["expired"] = delta.total_seconds() < 0
-    except Exception:
-        pass
+        except Exception:
+            pass
     return info
 
 
@@ -168,15 +172,21 @@ def import_custom(cert_path: str, key_path: str) -> bool:
     if not c.exists() or not k.exists():
         ui.err("Certificate or key file not found.")
         return False
-    # validate pair
-    r = subprocess.run(
-        ["sh", "-c",
-         f"openssl x509 -noout -modulus -in '{c}' | openssl md5; "
-         f"openssl rsa -noout -modulus -in '{k}' 2>/dev/null | openssl md5"],
-        capture_output=True, text=True)
-    if r.returncode == 0:
-        lines = [l for l in r.stdout.splitlines() if "MD5" in l]
-        if len(lines) == 2 and lines[0] != lines[1]:
+    # Validate modulus match directly in Python without spawning sh/md5 pipes
+    r_cert = subprocess.run(
+        ["openssl", "x509", "-noout", "-modulus", "-in", str(c)],
+        capture_output=True,
+        text=True,
+    )
+    r_key = subprocess.run(
+        ["openssl", "rsa", "-noout", "-modulus", "-in", str(k)],
+        capture_output=True,
+        text=True,
+    )
+    if r_cert.returncode == 0 and r_key.returncode == 0:
+        h_cert = hashlib.md5(r_cert.stdout.strip().encode()).hexdigest()
+        h_key  = hashlib.md5(r_key.stdout.strip().encode()).hexdigest()
+        if h_cert != h_key:
             ui.err("Certificate and key do NOT match.")
             return False
     try:

@@ -11,10 +11,10 @@ from ..features import live_reload, tunnel, wake_lock
 # ---------------------------------------------------------------------------
 def status() -> dict[str, bool]:
     return {
-        "nginx":   helpers.is_process_running("nginx"),
-        "php-fpm": helpers.is_process_running("php-fpm"),
+        "nginx":   helpers.is_process_running("nginx", pid_file=paths.PID_NGINX),
+        "php-fpm": helpers.is_process_running("php-fpm", pid_file=paths.PID_PHP),
         "mariadb": helpers.mariadb_is_running(),
-        "redis":   helpers.is_process_running("redis-server"),
+        "redis":   helpers.is_process_running("redis-server", pid_file=paths.PID_REDIS),
         "live":    live_reload.is_running(),
         "tunnel":  tunnel.is_running(),
     }
@@ -31,11 +31,10 @@ def _ensure_pma_storage():
         pma_sql = paths.HTDOCS_DIR / "phpmyadmin/sql/create_tables.sql"
         if not (paths.MARIADB_SOCKET.exists() and pma_sql.exists()):
             return
-        cli = helpers.mysql_client()
-        r = helpers.run_cmd_capture(
-            f"{cli} -u root --socket='{paths.MARIADB_SOCKET}' -N -B -e "
-            f"\"SELECT COUNT(*) FROM information_schema.tables "
-            f"WHERE table_schema='phpmyadmin' AND table_name LIKE 'pma\\\\_%';\"")
+        r = helpers.run_mysql_query(
+            "SELECT COUNT(*) FROM information_schema.tables "
+            "WHERE table_schema='phpmyadmin' AND table_name LIKE 'pma\\_%';"
+        )
         try:
             count = int((r.stdout or "").strip() or "0")
         except ValueError:
@@ -43,13 +42,18 @@ def _ensure_pma_storage():
         if count > 0:
             return
         ui.info("Setting up phpMyAdmin storage...")
-        helpers.run_cmd_capture(
-            f"{cli} -u root --socket='{paths.MARIADB_SOCKET}' -e "
-            f"\"CREATE DATABASE IF NOT EXISTS phpmyadmin "
-            f"DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;\"")
-        helpers.run_cmd_capture(
-            f"{cli} -u root --socket='{paths.MARIADB_SOCKET}' --force "
-            f"phpmyadmin < '{pma_sql}'")
+        helpers.run_mysql_query(
+            "CREATE DATABASE IF NOT EXISTS phpmyadmin "
+            "DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+        )
+        sql_text = pma_sql.read_text(errors="ignore")
+        helpers.run_mysql_query(
+            sql_text,
+            database="phpmyadmin",
+            batch=False,
+            force=True,
+            timeout=30,
+        )
     except Exception:
         pass
 
@@ -64,7 +68,8 @@ def start_all(open_browser: bool = True) -> bool:
         ui.info("If this is wrong, run: myserver reinstall")
         return False
 
-    nginx.enforce_htdocs_permissions(paths.HTDOCS_DIR)
+    # Fast top-level permission check (<2ms, 0 subprocesses)
+    nginx.enforce_htdocs_permissions(paths.HTDOCS_DIR, deep=False)
     wake_lock.acquire()
 
     ui.step("Starting MariaDB...")
@@ -73,8 +78,11 @@ def start_all(open_browser: bool = True) -> bool:
         return False
     _ensure_pma_storage()
 
-    ui.step("Starting Redis...")
-    redis.start()
+    if redis.is_enabled():
+        ui.step("Starting Redis...")
+        redis.start()
+    else:
+        ui.info("Redis disabled (process-saving mode).")
 
     ui.step("Starting PHP-FPM...")
     php.start()
@@ -82,18 +90,19 @@ def start_all(open_browser: bool = True) -> bool:
     ui.step("Starting Nginx...")
     nginx.start()
 
-    time.sleep(1)
+    time.sleep(0.8)
     s = status()
     if not (s["nginx"] and s["php-fpm"]):
         ui.warn("Some services did not start — run 'myserver doctor'.")
         return False
 
-    ui.ok("Services started successfully.")
+    proc_count, rss_mb = helpers.count_user_processes()
+    ui.ok(f"Services started ({proc_count}/{paths.ANDROID_PHANTOM_LIMIT} Android processes, ~{rss_mb:.1f} MB RAM).")
     ui.info("Live Reload:  myserver live-start")
     ui.info("Public URL:   myserver internet-enable")
 
     if open_browser and helpers.command_exists("termux-open-url"):
-        helpers.run_cmd("termux-open-url http://localhost:8080")
+        helpers.run_cmd(["termux-open-url", "http://localhost:8080"])
     return True
 
 
@@ -111,7 +120,6 @@ def stop_all(quiet: bool = False) -> bool:
         if live_reload.is_running():
             live_reload.stop(quiet=True)
         else:
-            # ensure the injection conf is empty
             paths.LIVE_CONF_FILE.write_text("")
     except Exception:
         pass
@@ -138,7 +146,7 @@ def stop_all(quiet: bool = False) -> bool:
 
 def restart_all() -> bool:
     stop_all(quiet=True)
-    time.sleep(1)
+    time.sleep(0.8)
     return start_all(open_browser=False)
 
 
@@ -146,8 +154,8 @@ def tail_service_logs(which: str, lines: int = 50) -> int:
     mapping = {
         "nginx":  [paths.LOG_DIR / "nginx-access.log",
                    paths.LOG_DIR / "nginx-error.log"],
-        "php":    [paths.PREFIX / "var/log/php-fpm.log"],
-        "redis":  [paths.PREFIX / "var/log/redis.log"],
+        "php":    [paths.LOG_DIR / "php-fpm.log"],
+        "redis":  [paths.LOG_DIR / "redis.log"],
         "live":   [paths.LIVE_LOG_FILE],
         "tunnel": [paths.TUNNEL_LOG],
     }

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 from ..core import paths, helpers, ui
 
@@ -11,7 +12,7 @@ def acquire():
     if not helpers.command_exists("termux-wake-lock"):
         ui.warn("termux-wake-lock not available (install Termux:API).")
         return False
-    helpers.run_cmd("termux-wake-lock")
+    helpers.run_cmd(["termux-wake-lock"])
     ui.ok("Wake lock acquired.")
     return True
 
@@ -19,7 +20,7 @@ def acquire():
 def release():
     if not helpers.command_exists("termux-wake-unlock"):
         return False
-    helpers.run_cmd("termux-wake-unlock")
+    helpers.run_cmd(["termux-wake-unlock"])
     ui.info("Wake lock released.")
     return True
 
@@ -45,10 +46,9 @@ def install_boot_script() -> bool:
     try:
         script.write_text(content)
         script.chmod(0o755)
-        ui.ok(f"Boot script installed: {script}")
+        ui.ok(f"Boot script ready: {script}")
         if not _termux_boot_installed():
-            ui.warn("Termux:Boot app not detected. Install it from F-Droid "
-                    "for the script to run at boot.")
+            ui.info("Note: Install Termux:Boot from F-Droid if you want auto-start on device boot.")
         return True
     except Exception as e:
         ui.err(f"Boot script write failed: {e}")
@@ -56,12 +56,18 @@ def install_boot_script() -> bool:
 
 
 def _termux_boot_installed() -> bool:
+    if Path("/data/data/com.termux.boot").exists():
+        return True
+    if not helpers.command_exists("pm"):
+        return False
     try:
         r = subprocess.run(
-            ["sh", "-c",
-             "pm list packages 2>/dev/null | grep -q com.termux.boot"],
-            timeout=5)
-        return r.returncode == 0
+            ["pm", "list", "packages", "com.termux.boot"],
+            capture_output=True,
+            text=True,
+            timeout=4,
+        )
+        return r.returncode == 0 and "com.termux.boot" in (r.stdout or "")
     except Exception:
         return False
 

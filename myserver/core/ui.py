@@ -27,8 +27,11 @@ def ensure_fzf() -> bool:
     if command_exists("fzf"):
         return True
     print(f"{C_YELLOW}[*] Installing fzf (one-time)...{C_RESET}")
-    r = subprocess.run("pkg install -y fzf", shell=True,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    r = subprocess.run(
+        ["pkg", "install", "-y", "fzf"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
     return r.returncode == 0 and command_exists("fzf")
 
 
@@ -62,7 +65,10 @@ def choose_option(title: str, options: list[str], default: int = 0) -> int:
              f"--header={title}", "--header-first", "--pointer=>",
              "--marker= ", "--prompt=  ",
              "--color=pointer:cyan,fg+:cyan,header:yellow,prompt:cyan"],
-            input="\n".join(reordered) + "\n", capture_output=True, text=True)
+            input="\n".join(reordered) + "\n",
+            capture_output=True,
+            text=True,
+        )
         if result.returncode == 0 and result.stdout.strip():
             idx_str = result.stdout.strip().split("\t", 1)[0]
             try:

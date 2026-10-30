@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "termux-web-server"
+version = "2.22.0"
+description = "Lightweight, Android-optimized LEMP web development stack manager for Termux"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+authors = [
+    {name = "Elias M. Esmail"}
+]
+dependencies = []
+
+[project.scripts]
+myserver = "myserver.cli:main"
+myserver-live = "myserver.features.live_server:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["myserver*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

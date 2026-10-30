@@ -6,6 +6,7 @@ import subprocess
 import time
 
 from ..core import paths, helpers, ui
+from ..services import mariadb
 
 
 CLOUDFLARED_URL_RE = re.compile(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com")
@@ -13,11 +14,7 @@ CLOUDFLARED_URL_RE = re.compile(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com")
 
 # ---------------------------------------------------------------------------
 def is_running() -> bool:
-    if paths.PID_TUNNEL.exists():
-        pid = helpers.read_pid_file(paths.PID_TUNNEL)
-        if pid and helpers.pid_alive(pid):
-            return True
-    return helpers.is_process_running("cloudflared tunnel")
+    return helpers.is_process_running("cloudflared", pid_file=paths.PID_TUNNEL)
 
 
 def get_url() -> str:
@@ -30,8 +27,8 @@ def get_url() -> str:
 
 
 # ---------------------------------------------------------------------------
-def enable():
-    if not helpers.is_process_running("nginx"):
+def enable(port: int = 8080):
+    if not helpers.is_process_running("nginx", pid_file=paths.PID_NGINX):
         ui.err("Server is not running.")
         return False
 
@@ -41,13 +38,16 @@ def enable():
 
     if not helpers.command_exists("cloudflared"):
         ui.warn("cloudflared not found — installing...")
-        helpers.run_cmd("pkg install -y cloudflared")
+        helpers.run_cmd(["pkg", "install", "-y", "cloudflared"])
         if not helpers.command_exists("cloudflared"):
             ui.err("Failed to install cloudflared.")
             return False
 
-    # Informational check — NOT a blocker.
-    # cloudflared will fail with its own clear message if offline.
+    # Security check: inform user about phpMyAdmin protection and root password
+    ui.info("Security: /phpmyadmin and /phpinfo are automatically blocked (HTTP 403) on public tunnel requests.")
+    if not mariadb.read_password_from_my_cnf():
+        ui.warn("Notice: MariaDB root has no password. Local apps with exposed debug routes remain risky.")
+
     online, diag = helpers.check_internet()
     if online:
         ui.info(f"Internet: {diag}")
@@ -55,7 +55,7 @@ def enable():
         ui.warn(f"Internet check inconclusive ({diag}).")
         ui.info("Proceeding anyway — cloudflared will report if truly offline.")
 
-    ui.step("Starting Cloudflare tunnel...")
+    ui.step(f"Starting Cloudflare tunnel (http://localhost:{port})...")
     for f in (paths.PID_TUNNEL, paths.TUNNEL_URL_FILE, paths.TUNNEL_LOG):
         try:
             if f.exists():
@@ -65,17 +65,19 @@ def enable():
 
     with open(paths.TUNNEL_LOG, "ab") as logf:
         proc = subprocess.Popen(
-            ["cloudflared", "tunnel", "--url", "http://localhost:8080",
+            ["cloudflared", "tunnel", "--url", f"http://localhost:{port}",
              "--no-autoupdate"],
-            stdout=logf, stderr=logf, stdin=subprocess.DEVNULL,
-            start_new_session=True)
+            stdout=logf,
+            stderr=logf,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
     helpers.write_pid_file(paths.PID_TUNNEL, proc.pid)
 
     ui.info("Waiting for public URL (up to 45s)...")
     found = ""
     for _ in range(45):
         time.sleep(1)
-        # process died?
         if not helpers.pid_alive(proc.pid):
             break
         try:
@@ -92,7 +94,6 @@ def enable():
         ui.ok(f"Global URL: {found}")
         return True
 
-    # failure — inspect log to give the user a precise reason
     tail = ""
     try:
         tail = paths.TUNNEL_LOG.read_text(errors="ignore")
@@ -103,11 +104,10 @@ def enable():
     if "no such host" in tail.lower() or "dns" in tail.lower():
         ui.warn("Possible DNS problem — try: ping google.com")
     elif "connection refused" in tail.lower():
-        ui.warn("Nginx may not be listening on 8080.")
+        ui.warn(f"Nginx may not be listening on {port}.")
     elif "network is unreachable" in tail.lower():
         ui.warn("No internet from cloudflared's view.")
     elif tail.strip():
-        # show last few lines
         lines = [l for l in tail.splitlines() if l.strip()]
         print(f"{ui.C_YELLOW}--- last cloudflared output ---{ui.C_RESET}")
         for ln in lines[-8:]:
