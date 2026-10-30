@@ -2,7 +2,7 @@
 
 **A complete, Android-optimized local web development stack (LEMP + Redis + Tools) powered by Termux.**
 
-> 🌐 **Language / اللغة:** [🇸🇦 للغة العربية اضغط هنا](./ARREADME.md) <br> 📄 **Release Notes:** [View Changelog](./CHANGELOG.md)
+> 🌐 **Language / اللغة:** [🇸🇦 للغة العربية اضغط هنا](./arreadme.md) <br> 📄 **Release Notes:** [View Changelog](./CHANGELOG.md)
 
 <br/>
 
@@ -332,7 +332,7 @@ termux-web-server/
 ├── VERSION                     # Current Semantic Version (2.22.0)
 ├── CHANGELOG.md                # Release history & changelog
 ├── README.md                   # English documentation
-├── ARREADME.md                 # Arabic documentation (النسخة العربية)
+├── arreadme.md                 # Arabic documentation (النسخة العربية)
 ├── pyproject.toml              # Standard Python packaging & test config
 ├── myserver/
 │   ├── __init__.py
@@ -386,7 +386,7 @@ python3 -m unittest discover -s tests -v
 - **Developer:** Elias M. Esmail
 - **GitHub Profile:** [elias0esmail](https://github.com/elias0esmail)
 - **Repository:** [termux-web-server](https://github.com/elias0esmail/termux-web-server)
-- **Arabic Guide:** [ (الدليل الشامل باللغة العربية)](./ARREADME.md)
+- **Arabic Guide:** [ (الدليل الشامل باللغة العربية)](./arreadme.md)
 - **Changelog:** [CHANGELOG](CHANGELOG.md)
 - **Issues & Bug Reports:** [https://github.com/elias0esmail/termux-web-server/issues](https://github.com/elias0esmail/termux-web-server/issues)
 - **WhatsApp:** `+967771902342`
