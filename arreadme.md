@@ -6,12 +6,12 @@
 
 <br/>
 
-&lt;p align=&quot;center&quot;&gt;
-  &lt;img src=&quot;https://github.com/elias0esmail/termux-web-server/blob/main/Screenshot.jpg&quot; alt=&quot;MyServer Banner and Status&quot;/&gt;
-&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt;
-  &lt;img src=&quot;https://github.com/elias0esmail/termux-web-server/blob/main/Screenshot1.jpg&quot; alt=&quot;MyServer Interactive Menu&quot;/&gt;
-&lt;/p&gt;
+<p align="center">
+<img src="https://github.com/elias0esmail/termux-web-server/blob/main/Screenshot.jpg"/>
+</p>
+<p align="center">
+<img src="https://github.com/elias0esmail/termux-web-server/blob/main/Screenshot1.jpg"/>
+</p>
 
 <br/>
 
